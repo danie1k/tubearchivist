@@ -25,7 +25,9 @@ function sync_blackhole {
         --exclude ".gitignore" \
         --exclude "**/cache" \
         --exclude "**/__pycache__/" \
+        --exclude ".venv" \
         --exclude "db.sqlite3" \
+        --exclude ".mypy_cache" \
         . -e ssh "$host":tubearchivist
 
     ssh "$host" 'docker build -t bbilly1/tubearchivist --build-arg TARGETPLATFORM="linux/amd64" tubearchivist'
@@ -48,7 +50,10 @@ function sync_test {
         --exclude ".gitignore" \
         --exclude "**/cache" \
         --exclude "**/__pycache__/" \
+        --exclude "**/.pytest_cache/" \
+        --exclude ".venv" \
         --exclude "db.sqlite3" \
+        --exclude ".mypy_cache" \
         . -e ssh "$host":tubearchivist
 
     # copy default docker-compose file if not exist
@@ -82,15 +87,17 @@ function validate {
 
     echo "run validate on $check_path"
 
+    # note: this logic is duplicated in the `./github/workflows/lint_python.yml` config
+    # if you update this file, you should update that as well
     echo "running black"
-    black --diff --color --check -l 79 "$check_path"
+    black --force-exclude "migrations/*" --diff --color --check -l 79 "$check_path"
     echo "running codespell"
-    codespell --skip="./.git" "$check_path"
+    codespell --skip="./.git,./.venv,./package.json,./package-lock.json,./node_modules,./.mypy_cache" "$check_path"
     echo "running flake8"
-    flake8 "$check_path" --count --max-complexity=10 --max-line-length=79 \
-        --show-source --statistics
+    flake8 "$check_path" --exclude "migrations,.venv" --count --max-complexity=10 \
+        --max-line-length=79 --show-source --statistics
     echo "running isort"
-    isort --check-only --diff --profile black -l 79 "$check_path"
+    isort --skip "migrations" --skip ".venv" --check-only --diff --profile black -l 79 "$check_path"
     printf "    \n> all validations passed\n"
 
 }
@@ -150,7 +157,7 @@ function sync_docker {
     fi
 
     echo "latest tags:"
-    git tag | tail -n 5 | sort -r
+    git tag | sort -rV | head -n 5
 
     printf "\ncreate new version:\n"
     read -r VERSION
@@ -182,7 +189,7 @@ function sync_docker_old {
     fi
 
     echo "latest tags:"
-    git tag | tail -n 5 | sort -r
+    git tag | sort -rV | head -n 5
 
     printf "\ncreate new version:\n"
     read -r VERSION
@@ -211,8 +218,6 @@ if [[ $1 == "blackhole" ]]; then
 elif [[ $1 == "test" ]]; then
     sync_test "$2"
 elif [[ $1 == "validate" ]]; then
-    # check package versions in requirements.txt for updates
-    python version_check.py
     validate "$2"
 elif [[ $1 == "docker" ]]; then
     sync_docker

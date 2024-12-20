@@ -1,5 +1,17 @@
 {
     "index_config": [{
+            "index_name": "config",
+            "expected_map": {
+                "config": {
+                    "type": "object",
+                    "enabled": false
+                }
+            },
+            "expected_set": {
+                "number_of_replicas": "0"
+            }
+        },
+        {
             "index_name": "channel",
             "expected_map": {
                 "channel_id": {
@@ -40,6 +52,16 @@
                     "type": "date",
                     "format": "epoch_second"
                 },
+                "channel_tags": {
+                    "type": "text",
+                    "analyzer": "english",
+                    "fields": {
+                        "keyword": {
+                            "type": "keyword",
+                            "ignore_above": 256
+                        }
+                    }
+                },
                 "channel_overwrites": {
                     "properties": {
                         "download_format": {
@@ -52,7 +74,16 @@
                             "type": "boolean"
                         },
                         "integrate_sponsorblock": {
-                            "type" : "boolean"
+                            "type": "boolean"
+                        },
+                        "subscriptions_channel_size": {
+                            "type": "long"
+                        },
+                        "subscriptions_live_channel_size": {
+                            "type": "long"
+                        },
+                        "subscriptions_shorts_channel_size": {
+                            "type": "long"
                         }
                     }
                 }
@@ -81,7 +112,8 @@
                     "index": false
                 },
                 "date_downloaded": {
-                    "type": "date"
+                    "type": "date",
+                    "format": "epoch_second"
                 },
                 "channel": {
                     "properties": {
@@ -123,6 +155,16 @@
                             "type": "date",
                             "format": "epoch_second"
                         },
+                        "channel_tags": {
+                            "type": "text",
+                            "analyzer": "english",
+                            "fields": {
+                                "keyword": {
+                                    "type": "keyword",
+                                    "ignore_above": 256
+                                }
+                            }
+                        },
                         "channel_overwrites": {
                             "properties": {
                                 "download_format": {
@@ -135,7 +177,16 @@
                                     "type": "boolean"
                                 },
                                 "integrate_sponsorblock": {
-                                    "type" : "boolean"
+                                    "type": "boolean"
+                                },
+                                "subscriptions_channel_size": {
+                                    "type": "long"
+                                },
+                                "subscriptions_live_channel_size": {
+                                    "type": "long"
+                                },
+                                "subscriptions_shorts_channel_size": {
+                                    "type": "long"
                                 }
                             }
                         }
@@ -147,6 +198,9 @@
                 "media_url": {
                     "type": "keyword",
                     "index": false
+                },
+                "media_size": {
+                    "type": "long"
                 },
                 "tags": {
                     "type": "text",
@@ -175,9 +229,13 @@
                     }
                 },
                 "vid_last_refresh": {
-                    "type": "date"
+                    "type": "date",
+                    "format": "epoch_second"
                 },
                 "youtube_id": {
+                    "type": "keyword"
+                },
+                "vid_type": {
                     "type": "keyword"
                 },
                 "published": {
@@ -193,19 +251,40 @@
                         }
                     }
                 },
-                "stats" : {
-                    "properties" : {
-                        "average_rating" : {
-                            "type" : "float"
+                "comment_count": {
+                    "type": "long"
+                },
+                "stats": {
+                    "properties": {
+                        "average_rating": {
+                            "type": "float"
                         },
-                        "dislike_count" : {
-                            "type" : "long"
+                        "dislike_count": {
+                            "type": "long"
                         },
-                        "like_count" : {
-                            "type" : "long"
+                        "like_count": {
+                            "type": "long"
                         },
-                        "view_count" : {
-                            "type" : "long"
+                        "view_count": {
+                            "type": "long"
+                        }
+                    }
+                },
+                "player": {
+                    "properties": {
+                        "duration": {
+                            "type": "long"
+                        },
+                        "duration_str": {
+                            "type": "keyword",
+                            "index": false
+                        },
+                        "watched": {
+                            "type": "boolean"
+                        },
+                        "watched_date": {
+                            "type": "date",
+                            "format": "epoch_second"
                         }
                     }
                 },
@@ -235,10 +314,35 @@
                         }
                     }
                 },
+                "streams": {
+                    "properties": {
+                        "type": {
+                            "type": "keyword",
+                            "index": false
+                        },
+                        "index": {
+                            "type": "short",
+                            "index": false
+                        },
+                        "codec": {
+                            "type": "text"
+                        },
+                        "width": {
+                            "type": "short"
+                        },
+                        "height": {
+                            "type": "short"
+                        },
+                        "bitrate": {
+                            "type": "integer"
+                        }
+                    }
+                },
                 "sponsorblock": {
                     "properties": {
                         "last_refresh": {
-                            "type": "date"
+                            "type": "date",
+                            "format": "epoch_second"
                         },
                         "has_unlocked": {
                             "type": "boolean"
@@ -246,28 +350,28 @@
                         "is_enabled": {
                             "type": "boolean"
                         },
-                        "segments" : {
-                            "properties" : {
-                                "UUID" : {
+                        "segments": {
+                            "properties": {
+                                "UUID": {
                                     "type": "keyword"
                                 },
-                                "actionType" : {
+                                "actionType": {
                                     "type": "keyword"
                                 },
-                                "category" : {
+                                "category": {
                                     "type": "keyword"
                                 },
-                                "locked" : {
-                                    "type" : "short"
+                                "locked": {
+                                    "type": "short"
                                 },
-                                "segment" : {
-                                    "type" : "float"
+                                "segment": {
+                                    "type": "float"
                                 },
-                                "videoDuration" : {
-                                    "type" : "float"
+                                "videoDuration": {
+                                    "type": "float"
                                 },
-                                "votes" : {
-                                    "type" : "long"
+                                "votes": {
+                                    "type": "long"
                                 }
                             }
                         }
@@ -290,7 +394,8 @@
             "index_name": "download",
             "expected_map": {
                 "timestamp": {
-                    "type": "date"
+                    "type": "date",
+                    "format": "epoch_second"
                 },
                 "channel_id": {
                     "type": "keyword"
@@ -323,6 +428,15 @@
                 },
                 "youtube_id": {
                     "type": "keyword"
+                },
+                "vid_type": {
+                    "type": "keyword"
+                },
+                "auto_start": {
+                    "type": "boolean"
+                },
+                "message": {
+                    "type": "text"
                 }
             },
             "expected_set": {
@@ -379,7 +493,43 @@
                     "type": "keyword"
                 },
                 "playlist_last_refresh": {
-                    "type": "date"
+                    "type": "date",
+                    "format": "epoch_second"
+                },
+                "playlist_entries": {
+                    "properties": {
+                        "downloaded": {
+                            "type": "boolean"
+                        },
+                        "idx": {
+                            "type": "long"
+                        },
+                        "title": {
+                            "type": "text",
+                            "analyzer": "english",
+                            "fields": {
+                                "keyword": {
+                                    "type": "keyword",
+                                    "ignore_above": 256,
+                                    "normalizer": "to_lower"
+                                }
+                            }
+                        },
+                        "uploader": {
+                            "type": "text",
+                            "analyzer": "english",
+                            "fields": {
+                                "keyword": {
+                                    "type": "keyword",
+                                    "ignore_above": 256,
+                                    "normalizer": "to_lower"
+                                }
+                            }
+                        },
+                        "youtube_id": {
+                            "type": "keyword"
+                        }
+                    }
                 }
             },
             "expected_set": {
@@ -433,10 +583,11 @@
                     "type": "text"
                 },
                 "subtitle_last_refresh": {
-                    "type": "date"
+                    "type": "date",
+                    "format": "epoch_second"
                 },
                 "subtitle_index": {
-                    "type" : "long"
+                    "type": "long"
                 },
                 "subtitle_lang": {
                     "type": "keyword"
@@ -445,8 +596,79 @@
                     "type": "keyword"
                 },
                 "subtitle_line": {
-                    "type" : "text",
+                    "type": "text",
                     "analyzer": "english"
+                }
+            },
+            "expected_set": {
+                "analysis": {
+                    "normalizer": {
+                        "to_lower": {
+                            "type": "custom",
+                            "filter": ["lowercase"]
+                        }
+                    }
+                },
+                "number_of_replicas": "0"
+            }
+        },
+        {
+            "index_name": "comment",
+            "expected_map": {
+                "youtube_id": {
+                    "type": "keyword"
+                },
+                "comment_last_refresh": {
+                    "type": "date",
+                    "format": "epoch_second"
+                },
+                "comment_channel_id": {
+                    "type": "keyword"
+                },
+                "comment_comments": {
+                    "properties": {
+                        "comment_id": {
+                            "type": "keyword"
+                        },
+                        "comment_text": {
+                            "type": "text"
+                        },
+                        "comment_timestamp": {
+                            "type": "date",
+                            "format": "epoch_second"
+                        },
+                        "comment_time_text": {
+                            "type": "text"
+                        },
+                        "comment_likecount": {
+                            "type": "long"
+                        },
+                        "comment_is_favorited": {
+                            "type": "boolean"
+                        },
+                        "comment_author": {
+                            "type": "text",
+                            "fields": {
+                                "keyword": {
+                                    "type": "keyword",
+                                    "ignore_above": 256,
+                                    "normalizer": "to_lower"
+                                }
+                            }
+                        },
+                        "comment_author_id": {
+                            "type": "keyword"
+                        },
+                        "comment_author_thumbnail": {
+                            "type": "keyword"
+                        },
+                        "comment_author_is_uploader": {
+                            "type": "boolean"
+                        },
+                        "comment_parent": {
+                            "type": "keyword"
+                        }
+                    }
                 }
             },
             "expected_set": {

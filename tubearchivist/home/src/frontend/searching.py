@@ -6,154 +6,18 @@ Functionality:
 - calculate pagination values
 """
 
-import urllib.parse
-from datetime import datetime
-
-from home.src.download.thumbnails import ThumbManager
+from api.src.search_processor import SearchProcess
 from home.src.es.connect import ElasticWrap
-from home.src.ta.config import AppConfig
-
-
-class SearchHandler:
-    """search elastic search"""
-
-    def __init__(self, path, config, data=False):
-        self.max_hits = None
-        self.path = path
-        self.config = config
-        self.data = data
-
-    def get_data(self):
-        """get the data"""
-        response, _ = ElasticWrap(self.path, config=self.config).get(self.data)
-
-        if "hits" in response.keys():
-            self.max_hits = response["hits"]["total"]["value"]
-            return_value = response["hits"]["hits"]
-        else:
-            # simulate list for single result to reuse rest of class
-            return_value = [response]
-
-        # stop if empty
-        if not return_value:
-            return False
-
-        all_videos = []
-        all_channels = []
-        for idx, hit in enumerate(return_value):
-            return_value[idx] = self.hit_cleanup(hit)
-            if hit["_index"] == "ta_video":
-                video_dict, channel_dict = self.vid_cache_link(hit)
-                if video_dict not in all_videos:
-                    all_videos.append(video_dict)
-                if channel_dict not in all_channels:
-                    all_channels.append(channel_dict)
-            elif hit["_index"] == "ta_channel":
-                channel_dict = self.channel_cache_link(hit)
-                if channel_dict not in all_channels:
-                    all_channels.append(channel_dict)
-
-        return return_value
-
-    @staticmethod
-    def vid_cache_link(hit):
-        """download thumbnails into cache"""
-        vid_thumb = hit["source"]["vid_thumb_url"]
-        youtube_id = hit["source"]["youtube_id"]
-        channel_id_hit = hit["source"]["channel"]["channel_id"]
-        chan_thumb = hit["source"]["channel"]["channel_thumb_url"]
-        try:
-            chan_banner = hit["source"]["channel"]["channel_banner_url"]
-        except KeyError:
-            chan_banner = False
-        video_dict = {"youtube_id": youtube_id, "vid_thumb": vid_thumb}
-        channel_dict = {
-            "channel_id": channel_id_hit,
-            "chan_thumb": chan_thumb,
-            "chan_banner": chan_banner,
-        }
-        return video_dict, channel_dict
-
-    @staticmethod
-    def channel_cache_link(hit):
-        """build channel thumb links"""
-        channel_id_hit = hit["source"]["channel_id"]
-        chan_thumb = hit["source"]["channel_thumb_url"]
-        try:
-            chan_banner = hit["source"]["channel_banner_url"]
-        except KeyError:
-            chan_banner = False
-        channel_dict = {
-            "channel_id": channel_id_hit,
-            "chan_thumb": chan_thumb,
-            "chan_banner": chan_banner,
-        }
-        return channel_dict
-
-    @staticmethod
-    def hit_cleanup(hit):
-        """clean up and parse data from a single hit"""
-        hit["source"] = hit.pop("_source")
-        hit_keys = hit["source"].keys()
-        if "media_url" in hit_keys:
-            parsed_url = urllib.parse.quote(hit["source"]["media_url"])
-            hit["source"]["media_url"] = parsed_url
-
-        if "published" in hit_keys:
-            published = hit["source"]["published"]
-            date_pub = datetime.strptime(published, "%Y-%m-%d")
-            date_str = datetime.strftime(date_pub, "%d %b, %Y")
-            hit["source"]["published"] = date_str
-
-        if "vid_last_refresh" in hit_keys:
-            vid_last_refresh = hit["source"]["vid_last_refresh"]
-            date_refresh = datetime.fromtimestamp(vid_last_refresh)
-            date_str = datetime.strftime(date_refresh, "%d %b, %Y")
-            hit["source"]["vid_last_refresh"] = date_str
-
-        if "playlist_last_refresh" in hit_keys:
-            playlist_last_refresh = hit["source"]["playlist_last_refresh"]
-            date_refresh = datetime.fromtimestamp(playlist_last_refresh)
-            date_str = datetime.strftime(date_refresh, "%d %b, %Y")
-            hit["source"]["playlist_last_refresh"] = date_str
-
-        if "vid_thumb_url" in hit_keys:
-            youtube_id = hit["source"]["youtube_id"]
-            thumb_path = ThumbManager(youtube_id).vid_thumb_path()
-            hit["source"]["vid_thumb_url"] = thumb_path
-
-        if "channel_last_refresh" in hit_keys:
-            refreshed = hit["source"]["channel_last_refresh"]
-            date_refresh = datetime.fromtimestamp(refreshed)
-            date_str = datetime.strftime(date_refresh, "%d %b, %Y")
-            hit["source"]["channel_last_refresh"] = date_str
-
-        if "channel" in hit_keys:
-            channel_keys = hit["source"]["channel"].keys()
-            if "channel_last_refresh" in channel_keys:
-                refreshed = hit["source"]["channel"]["channel_last_refresh"]
-                date_refresh = datetime.fromtimestamp(refreshed)
-                date_str = datetime.strftime(date_refresh, "%d %b, %Y")
-                hit["source"]["channel"]["channel_last_refresh"] = date_str
-
-        if "subtitle_fragment_id" in hit_keys:
-            youtube_id = hit["source"]["youtube_id"]
-            thumb_path = ThumbManager(youtube_id).vid_thumb_path()
-            hit["source"]["vid_thumb_url"] = f"/cache/{thumb_path}"
-
-        return hit
 
 
 class SearchForm:
     """build query from search form data"""
 
-    CONFIG = AppConfig().config
-
     def multi_search(self, search_query):
         """searching through index"""
         path, query, query_type = SearchParser(search_query).run()
-        look_up = SearchHandler(path, config=self.CONFIG, data=query)
-        search_results = look_up.get_data()
+        response, _ = ElasticWrap(path).get(data=query)
+        search_results = SearchProcess(response).process()
         all_results = self.build_results(search_results)
 
         return {"results": all_results, "queryType": query_type}
@@ -191,7 +55,7 @@ class SearchParser:
 
     def __init__(self, search_query):
         self.query_words = search_query.lower().split()
-        self.query_map = False
+        self.query_map = {"term": [], "fuzzy": []}
         self.append_to = "term"
 
     def run(self):
@@ -214,11 +78,11 @@ class SearchParser:
         if ":" in first_word:
             index_match, query_string = first_word.split(":")
             if index_match in key_word_map:
-                self.query_map = key_word_map.get(index_match)
+                self.query_map.update(key_word_map.get(index_match))
                 self.query_words[0] = query_string
                 return index_match
 
-        self.query_map = key_word_map.get("simple")
+        self.query_map.update(key_word_map.get("simple"))
         print(f"query_map: {self.query_map}")
 
         return "simple"
@@ -229,29 +93,24 @@ class SearchParser:
         return {
             "simple": {
                 "index": "ta_video,ta_channel,ta_playlist",
-                "term": [],
             },
             "video": {
                 "index": "ta_video",
-                "term": [],
                 "channel": [],
                 "active": [],
             },
             "channel": {
                 "index": "ta_channel",
-                "term": [],
                 "active": [],
                 "subscribed": [],
             },
             "playlist": {
                 "index": "ta_playlist",
-                "term": [],
                 "active": [],
                 "subscribed": [],
             },
             "full": {
                 "index": "ta_subtitle",
-                "term": [],
                 "lang": [],
                 "source": [],
             },
@@ -329,6 +188,20 @@ class QueryBuilder:
 
         return query
 
+    def _get_fuzzy(self):
+        """return fuziness valuee"""
+        fuzzy_value = self.query_map.get("fuzzy", ["auto"])[0]
+        if fuzzy_value == "no":
+            return 0
+
+        if not fuzzy_value.isdigit():
+            return "auto"
+
+        if int(fuzzy_value) > 2:
+            return "2"
+
+        return fuzzy_value
+
     def _build_simple(self):
         """build simple cross index query"""
         must_list = []
@@ -339,7 +212,7 @@ class QueryBuilder:
                     "multi_match": {
                         "query": term,
                         "type": "bool_prefix",
-                        "fuzziness": "auto",
+                        "fuzziness": self._get_fuzzy(),
                         "operator": "and",
                         "fields": [
                             "channel_name._2gram",
@@ -368,7 +241,7 @@ class QueryBuilder:
                     "multi_match": {
                         "query": term,
                         "type": "bool_prefix",
-                        "fuzziness": "auto",
+                        "fuzziness": self._get_fuzzy(),
                         "operator": "and",
                         "fields": [
                             "title._2gram^2",
@@ -390,7 +263,7 @@ class QueryBuilder:
                     "multi_match": {
                         "query": channel,
                         "type": "bool_prefix",
-                        "fuzziness": "auto",
+                        "fuzziness": self._get_fuzzy(),
                         "operator": "and",
                         "fields": [
                             "channel.channel_name._2gram",
@@ -413,13 +286,14 @@ class QueryBuilder:
                     "multi_match": {
                         "query": term,
                         "type": "bool_prefix",
-                        "fuzziness": "auto",
+                        "fuzziness": self._get_fuzzy(),
                         "operator": "and",
                         "fields": [
                             "channel_description",
                             "channel_name._2gram^2",
                             "channel_name._3gram^2",
                             "channel_name.search_as_you_type^2",
+                            "channel_tags",
                         ],
                     }
                 }
@@ -445,7 +319,7 @@ class QueryBuilder:
                     "multi_match": {
                         "query": term,
                         "type": "bool_prefix",
-                        "fuzziness": "auto",
+                        "fuzziness": self._get_fuzzy(),
                         "operator": "and",
                         "fields": [
                             "playlist_description",
@@ -477,7 +351,7 @@ class QueryBuilder:
                     "match": {
                         "subtitle_line": {
                             "query": term,
-                            "fuzziness": "auto",
+                            "fuzziness": self._get_fuzzy(),
                         }
                     }
                 }
@@ -493,7 +367,6 @@ class QueryBuilder:
 
         query = {
             "size": 30,
-            "_source": {"excludes": "subtitle_line"},
             "query": {"bool": {"must": must_list}},
             "highlight": {
                 "fields": {

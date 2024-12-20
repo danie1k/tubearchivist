@@ -2,9 +2,12 @@
 - hold all form classes used in the views
 """
 
+import os
+
 from django import forms
 from django.contrib.auth.forms import AuthenticationForm
 from django.forms.widgets import PasswordInput, TextInput
+from home.src.ta.helper import get_stylesheets
 
 
 class CustomAuthForm(AuthenticationForm):
@@ -29,20 +32,28 @@ class CustomAuthForm(AuthenticationForm):
 class UserSettingsForm(forms.Form):
     """user configurations values"""
 
-    CHOICES = [
-        ("", "-- change color scheme --"),
-        ("dark", "Dark"),
-        ("light", "Light"),
-    ]
+    STYLESHEET_CHOICES = [("", "-- change stylesheet --")]
+    STYLESHEET_CHOICES.extend(
+        [
+            (stylesheet, os.path.splitext(stylesheet)[0].title())
+            for stylesheet in get_stylesheets()
+        ]
+    )
 
-    colors = forms.ChoiceField(
-        widget=forms.Select, choices=CHOICES, required=False
+    stylesheet = forms.ChoiceField(
+        widget=forms.Select, choices=STYLESHEET_CHOICES, required=False
     )
     page_size = forms.IntegerField(required=False)
 
 
 class ApplicationSettingsForm(forms.Form):
     """handle all application settings"""
+
+    AUTOSTART_CHOICES = [
+        ("", "-- change subscription autostart --"),
+        ("0", "disable auto start"),
+        ("1", "enable auto start"),
+    ]
 
     METADATA_CHOICES = [
         ("", "-- change metadata embed --"),
@@ -68,10 +79,10 @@ class ApplicationSettingsForm(forms.Form):
         ("1", "enable sponsorblock integration"),
     ]
 
-    CAST_CHOICES = [
-        ("", "-- change Cast integration --"),
-        ("0", "disable Cast"),
-        ("1", "enable Cast"),
+    SNAPSHOT_CHOICES = [
+        ("", "-- change snapshot settings --"),
+        ("0", "disable system snapshots"),
+        ("1", "enable system snapshots"),
     ]
 
     SUBTITLE_SOURCE_CHOICES = [
@@ -86,19 +97,37 @@ class ApplicationSettingsForm(forms.Form):
         ("1", "enable subtitle index"),
     ]
 
-    COOKIE_IMPORT_CHOICES = [
-        ("", "-- change cookie settings"),
-        ("0", "disable cookie"),
-        ("1", "enable cookie"),
+    COMMENT_SORT_CHOICES = [
+        ("", "-- change comments sort settings --"),
+        ("top", "sort comments by top"),
+        ("new", "sort comments by new"),
     ]
 
-    subscriptions_channel_size = forms.IntegerField(required=False)
-    downloads_limit_count = forms.IntegerField(required=False)
+    COOKIE_IMPORT_CHOICES = [
+        ("", "-- change cookie settings"),
+        ("0", "remove cookie"),
+        ("1", "import cookie"),
+    ]
+
+    subscriptions_channel_size = forms.IntegerField(
+        required=False, min_value=1
+    )
+    subscriptions_live_channel_size = forms.IntegerField(
+        required=False, min_value=0
+    )
+    subscriptions_shorts_channel_size = forms.IntegerField(
+        required=False, min_value=0
+    )
+    subscriptions_auto_start = forms.ChoiceField(
+        widget=forms.Select, choices=AUTOSTART_CHOICES, required=False
+    )
     downloads_limit_speed = forms.IntegerField(required=False)
     downloads_throttledratelimit = forms.IntegerField(required=False)
     downloads_sleep_interval = forms.IntegerField(required=False)
     downloads_autodelete_days = forms.IntegerField(required=False)
     downloads_format = forms.CharField(required=False)
+    downloads_format_sort = forms.CharField(required=False)
+    downloads_extractor_lang = forms.CharField(required=False)
     downloads_add_metadata = forms.ChoiceField(
         widget=forms.Select, choices=METADATA_CHOICES, required=False
     )
@@ -112,6 +141,10 @@ class ApplicationSettingsForm(forms.Form):
     downloads_subtitle_index = forms.ChoiceField(
         widget=forms.Select, choices=SUBTITLE_INDEX_CHOICES, required=False
     )
+    downloads_comment_max = forms.CharField(required=False)
+    downloads_comment_sort = forms.ChoiceField(
+        widget=forms.Select, choices=COMMENT_SORT_CHOICES, required=False
+    )
     downloads_cookie_import = forms.ChoiceField(
         widget=forms.Select, choices=COOKIE_IMPORT_CHOICES, required=False
     )
@@ -121,21 +154,9 @@ class ApplicationSettingsForm(forms.Form):
     downloads_integrate_sponsorblock = forms.ChoiceField(
         widget=forms.Select, choices=SP_CHOICES, required=False
     )
-    application_enable_cast = forms.ChoiceField(
-        widget=forms.Select, choices=CAST_CHOICES, required=False
+    application_enable_snapshot = forms.ChoiceField(
+        widget=forms.Select, choices=SNAPSHOT_CHOICES, required=False
     )
-
-
-class SchedulerSettingsForm(forms.Form):
-    """handle scheduler settings"""
-
-    update_subscribed = forms.CharField(required=False)
-    download_pending = forms.CharField(required=False)
-    check_reindex = forms.CharField(required=False)
-    check_reindex_days = forms.IntegerField(required=False)
-    thumbnail_check = forms.CharField(required=False)
-    run_backup = forms.CharField(required=False)
-    run_backup_rotate = forms.IntegerField(required=False)
 
 
 class MultiSearchForm(forms.Form):
@@ -200,6 +221,20 @@ class SubscribeToPlaylistForm(forms.Form):
     )
 
 
+class CreatePlaylistForm(forms.Form):
+    """text area form to create a single custom playlist"""
+
+    create = forms.CharField(
+        label="Or create custom playlist",
+        widget=forms.Textarea(
+            attrs={
+                "rows": 1,
+                "placeholder": "Input playlist name",
+            }
+        ),
+    )
+
+
 class ChannelOverwriteForm(forms.Form):
     """custom overwrites for channel settings"""
 
@@ -223,4 +258,13 @@ class ChannelOverwriteForm(forms.Form):
     )
     integrate_sponsorblock = forms.ChoiceField(
         widget=forms.Select, choices=SP_CHOICES, required=False
+    )
+    subscriptions_channel_size = forms.IntegerField(
+        label=False, required=False
+    )
+    subscriptions_live_channel_size = forms.IntegerField(
+        label=False, required=False
+    )
+    subscriptions_shorts_channel_size = forms.IntegerField(
+        label=False, required=False
     )

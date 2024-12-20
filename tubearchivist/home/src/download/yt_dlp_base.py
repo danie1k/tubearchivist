@@ -10,6 +10,7 @@ from http import cookiejar
 from io import StringIO
 
 import yt_dlp
+from home.src.ta.settings import EnvironmentSettings
 from home.src.ta.ta_redis import RedisArchivist
 
 
@@ -20,8 +21,9 @@ class YtWrap:
         "default_search": "ytsearch",
         "quiet": True,
         "check_formats": "selected",
-        "socket_timeout": 3,
+        "socket_timeout": 10,
         "extractor_retries": 3,
+        "retries": 10,
     }
 
     def __init__(self, obs_request, config=False):
@@ -47,21 +49,33 @@ class YtWrap:
         with yt_dlp.YoutubeDL(self.obs) as ydl:
             try:
                 ydl.download([url])
-            except yt_dlp.utils.DownloadError:
-                print(f"{url}: failed to download.")
-                return False
+            except yt_dlp.utils.DownloadError as err:
+                print(f"{url}: failed to download with message {err}")
+                if "Temporary failure in name resolution" in str(err):
+                    raise ConnectionError("lost the internet, abort!") from err
 
-        return True
+                return False, str(err)
+
+        return True, True
 
     def extract(self, url):
         """make extract request"""
         try:
             response = yt_dlp.YoutubeDL(self.obs).extract_info(url)
-        except cookiejar.LoadError:
-            print("cookie file is invalid")
+        except cookiejar.LoadError as err:
+            print(f"cookie file is invalid: {err}")
             return False
-        except (yt_dlp.utils.ExtractorError, yt_dlp.utils.DownloadError):
-            print(f"{url}: failed to get info from youtube")
+        except yt_dlp.utils.ExtractorError as err:
+            print(f"{url}: failed to extract with message: {err}, continue...")
+            return False
+        except yt_dlp.utils.DownloadError as err:
+            if "This channel does not have a" in str(err):
+                return False
+
+            print(f"{url}: failed to get info from youtube with message {err}")
+            if "Temporary failure in name resolution" in str(err):
+                raise ConnectionError("lost the internet, abort!") from err
+
             return False
 
         return response
@@ -73,6 +87,7 @@ class CookieHandler:
     def __init__(self, config):
         self.cookie_io = False
         self.config = config
+        self.cache_dir = EnvironmentSettings.CACHE_DIR
 
     def get(self):
         """get cookie io stream"""
@@ -82,8 +97,9 @@ class CookieHandler:
 
     def import_cookie(self):
         """import cookie from file"""
-        cache_path = self.config["application"]["cache_dir"]
-        import_path = os.path.join(cache_path, "import", "cookies.google.txt")
+        import_path = os.path.join(
+            self.cache_dir, "import", "cookies.google.txt"
+        )
 
         try:
             with open(import_path, encoding="utf-8") as cookie_file:
@@ -98,10 +114,10 @@ class CookieHandler:
         print("cookie: import successful")
 
     def set_cookie(self, cookie):
-        """set cookie str and activate in cofig"""
-        RedisArchivist().set_message("cookie", cookie)
+        """set cookie str and activate in config"""
+        RedisArchivist().set_message("cookie", cookie, save=True)
         path = ".downloads.cookie_import"
-        RedisArchivist().set_message("config", True, path=path)
+        RedisArchivist().set_message("config", True, path=path, save=True)
         self.config["downloads"]["cookie_import"] = True
         print("cookie: activated and stored in Redis")
 
@@ -151,7 +167,7 @@ class CookieHandler:
         now = datetime.now()
         message = {
             "status": response,
-            "validated": int(now.strftime("%s")),
+            "validated": int(now.timestamp()),
             "validated_str": now.strftime("%Y-%m-%d %H:%M"),
         }
         RedisArchivist().set_message("cookie:valid", message)

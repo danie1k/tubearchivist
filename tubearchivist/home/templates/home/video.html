@@ -2,8 +2,11 @@
 {% block content %}
 {% load static %}
 {% load humanize %}
-<div class="video-main">
-    <div class="video-modal"><span class="video-modal-text"></span></div>
+{% load auth_extras %}
+<div id="player" class="player-wrapper">
+    <div class="video-main">
+        <div class="video-modal"><span class="video-modal-text"></span></div>
+    </div>
 </div>
 <div class="notifications" id="notifications"></div>
 <div class="sponsorblock" id="sponsorblock">
@@ -54,11 +57,6 @@
                 {% else %}
                     <p>Youtube: Deactivated</p>
                 {% endif %}
-                <a download="" href="/media/{{ video.media_url }}"><button id="download-item">Download File</button></a>
-                <button onclick="deleteConfirm()" id="delete-item">Delete Video</button>
-                <div class="delete-confirm" id="delete-button">
-                    <span>Are you sure? </span><button class="danger-button" onclick="deleteVideo(this)" data-id="{{ video.youtube_id }}" data-redirect = "{{ video.channel.channel_id }}">Delete</button> <button onclick="cancelDelete()">Cancel</button>
-                </div>
             </div>
         </div>
         <div class="info-box-item">
@@ -69,15 +67,60 @@
                     <p class="thumb-icon"><img class="dislike" src="{% static 'img/icon-thumb.svg' %}" alt="thumbs-down">: {{ video.stats.dislike_count|intcomma }}</p>
                 {% endif %}
                 {% if video.stats.average_rating %}
-                    <p class="rating-stars">Rating:
+                    <div class="rating-stars">
                         {% for star in video.stats.average_rating %}
                             <img src="/static/img/icon-star-{{ star }}.svg" alt="{{ star }}">
                         {% endfor %}
-                    </p>
+                    </div>
                 {% endif %}
             </div>
         </div>
     </div>
+    <div class="info-box info-box-2">
+        <div class="info-box-item">
+            <div class="button-box">
+                {% if reindex %}
+                    <p>Reindex scheduled</p>
+                {% else %}
+                  {% if request.user|has_group:"admin" or request.user.is_staff %}
+                    <div id="reindex-button" class="button-box">
+                        <button data-id="{{ video.youtube_id }}" data-type="video" onclick="reindex(this)" title="Reindex {{ video.title }}">Reindex</button>
+                    </div>
+                  {% endif %}
+                {% endif %}
+                <a download="" href="{{ video.media_url }}"><button id="download-item">Download File</button></a>
+                {% if request.user|has_group:"admin" or request.user.is_staff %}
+                <button onclick="deleteConfirm()" id="delete-item">Delete Video</button>
+                <div class="delete-confirm" id="delete-button">
+                    <span>Are you sure? </span>
+                    <button class="danger-button" onclick="deleteVideo(this)" data-id="{{ video.youtube_id }}" data-redirect = "{{ video.channel.channel_id }}">Delete</button>
+                    <button class="danger-button" onclick="deleteVideo(this)" data-id="{{ video.youtube_id }}" data-ignore data-redirect = "{{ video.channel.channel_id }}">Delete and ignore</button>
+                    <button onclick="cancelDelete()">Cancel</button>
+                </div>
+                {% endif %}
+                <button id="{{ video.youtube_id }}-button" data-id="{{ video.youtube_id }}" data-context="video" onclick="showAddToPlaylistMenu(this)">Add To Playlist</button>
+            </div>
+        </div>
+        <div class="info-box-item">
+            {% if video.media_size %}
+                <p>File size: {{ video.media_size|filesizeformat }}</p>
+            {% endif %}
+            {% if video.streams %}
+                {% for stream in video.streams %}
+                    <p>{{ stream.type|title }}: {{ stream.codec }} {{ stream.bitrate|filesizeformat }}/s{% if stream.width %} <span class="space-carrot">|</span> {{ stream.width }}x{{ stream.height}}{% endif %}</p>
+                {% endfor %}
+            {% endif %}
+        </div>
+    </div>
+    {% if video.tags %}
+        <div class="description-box">
+            <div class="video-tag-box">
+                {% for tag in video.tags %}
+                    <span class="video-tag">{{ tag }}</span>
+                {% endfor %}
+            </div>
+        </div>
+    {% endif %}
     {% if video.description %}
         <div class="description-box">
             <p id="text-expand" class="description-text">
@@ -122,6 +165,24 @@
                 </div>
             </div>
         {% endfor %}
+    {% endif %}
+    <div class="description-box">
+        <h3>Similar Videos</h3>
+        <div class="video-list grid grid-3" id="similar-videos">
+        </div>
+        <script>getSimilarVideos('{{ video.youtube_id }}')</script>
+    </div>
+    {% if video.comment_count == 0 %}
+    <div class="comments-section">
+        <span>Video has no comments</span>
+    </div>
+    {% elif video.comment_count %}
+    <div class="comments-section">
+        <h3>Comments: {{video.comment_count}}</h3>
+        <div id="comments-list" class="comments-list">
+        </div>
+        <script>getComments('{{ video.youtube_id }}')</script>
+    </div>
     {% endif %}
 </div>
 <script>
