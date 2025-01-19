@@ -8,34 +8,42 @@ import math
 from home.src.download.yt_dlp_base import YtWrap
 from home.src.es.connect import ElasticWrap
 from home.src.ta.config import AppConfig
-from home.src.ta.ta_redis import RedisArchivist
+from home.src.ta.users import UserConfig
 
 
 class YouTubeItem:
     """base class for youtube"""
 
     es_path = False
-    index_name = False
-    yt_base = False
-    yt_obs = {
+    index_name = ""
+    yt_base = ""
+    yt_obs: dict[str, bool | str] = {
         "skip_download": True,
         "noplaylist": True,
     }
 
     def __init__(self, youtube_id):
         self.youtube_id = youtube_id
+        self.es_path = f"{self.index_name}/_doc/{youtube_id}"
         self.config = AppConfig().config
-        self.app_conf = self.config["application"]
         self.youtube_meta = False
         self.json_data = False
+
+    def build_yt_url(self):
+        """build youtube url"""
+        return self.yt_base + self.youtube_id
 
     def get_from_youtube(self):
         """use yt-dlp to get meta data from youtube"""
         print(f"{self.youtube_id}: get metadata from youtube")
-        url = self.yt_base + self.youtube_id
-        response = YtWrap(self.yt_obs, self.config).extract(url)
+        obs_request = self.yt_obs.copy()
+        if self.config["downloads"]["extractor_lang"]:
+            langs = self.config["downloads"]["extractor_lang"]
+            langs_list = [i.strip() for i in langs.split(",")]
+            obs_request["extractor_args"] = {"youtube": {"lang": langs_list}}
 
-        self.youtube_meta = response
+        url = self.build_yt_url()
+        self.youtube_meta = YtWrap(obs_request, self.config).extract(url)
 
     def get_from_es(self):
         """get indexed data from elastic search"""
@@ -56,11 +64,11 @@ class YouTubeItem:
             "ta_channel": "channel_active",
             "ta_playlist": "playlist_active",
         }
-        update_path = f"{self.index_name}/_update/{self.youtube_id}"
+        path = f"{self.index_name}/_update/{self.youtube_id}?refresh=true"
         data = {
             "script": f"ctx._source.{key_match.get(self.index_name)} = false"
         }
-        _, _ = ElasticWrap(update_path).post(data)
+        _, _ = ElasticWrap(path).post(data)
 
     def del_in_es(self):
         """delete item from elastic search"""
@@ -91,13 +99,7 @@ class Pagination:
 
     def get_page_size(self):
         """get default or user modified page_size"""
-        key = f"{self.request.user.id}:page_size"
-        page_size = RedisArchivist().get_message(key)["status"]
-        if not page_size:
-            config = AppConfig().config
-            page_size = config["archive"]["page_size"]
-
-        return page_size
+        return UserConfig(self.request.user.id).get_value("page_size")
 
     def first_guess(self):
         """build first guess before api call"""

@@ -12,6 +12,7 @@ from datetime import datetime
 import requests
 from home.src.es.connect import ElasticWrap
 from home.src.ta.helper import requests_headers
+from home.src.ta.settings import EnvironmentSettings
 
 
 class YoutubeSubtitle:
@@ -62,7 +63,12 @@ class YoutubeSubtitle:
         if not all_formats:
             return False
 
-        subtitle = [i for i in all_formats if i["ext"] == "json3"][0]
+        subtitle_json3 = [i for i in all_formats if i["ext"] == "json3"]
+        if not subtitle_json3:
+            print(f"{self.video.youtube_id}-{lang}: json3 not processed")
+            return False
+
+        subtitle = subtitle_json3[0]
         subtitle.update(
             {"lang": lang, "source": "auto", "media_url": media_url}
         )
@@ -108,18 +114,22 @@ class YoutubeSubtitle:
 
     def download_subtitles(self, relevant_subtitles):
         """download subtitle files to archive"""
-        videos_base = self.video.config["application"]["videos"]
+        videos_base = EnvironmentSettings.MEDIA_DIR
         indexed = []
         for subtitle in relevant_subtitles:
             dest_path = os.path.join(videos_base, subtitle["media_url"])
             source = subtitle["source"]
             lang = subtitle.get("lang")
             response = requests.get(
-                subtitle["url"], headers=requests_headers()
+                subtitle["url"], headers=requests_headers(), timeout=30
             )
             if not response.ok:
                 print(f"{self.video.youtube_id}: failed to download subtitle")
                 print(response.text)
+                continue
+
+            if not response.text:
+                print(f"{self.video.youtube_id}: skip empty subtitle")
                 continue
 
             parser = SubtitleParser(response.text, lang, source)
@@ -137,13 +147,17 @@ class YoutubeSubtitle:
 
         return indexed
 
-    @staticmethod
-    def _write_subtitle_file(dest_path, subtitle_str):
+    def _write_subtitle_file(self, dest_path, subtitle_str):
         """write subtitle file to disk"""
         # create folder here for first video of channel
         os.makedirs(os.path.split(dest_path)[0], exist_ok=True)
         with open(dest_path, "w", encoding="utf-8") as subfile:
             subfile.write(subtitle_str)
+
+        host_uid = EnvironmentSettings.HOST_UID
+        host_gid = EnvironmentSettings.HOST_GID
+        if host_uid and host_gid:
+            os.chown(dest_path, host_uid, host_gid)
 
     @staticmethod
     def _index_subtitle(query_str):
@@ -153,7 +167,7 @@ class YoutubeSubtitle:
     def delete(self, subtitles=False):
         """delete subtitles from index and filesystem"""
         youtube_id = self.video.youtube_id
-        videos_base = self.video.config["application"]["videos"]
+        videos_base = EnvironmentSettings.MEDIA_DIR
         # delete files
         if subtitles:
             files = [i["media_url"] for i in subtitles]
@@ -285,7 +299,7 @@ class SubtitleParser:
             "title": video.json_data.get("title"),
             "subtitle_channel": channel.get("channel_name"),
             "subtitle_channel_id": channel.get("channel_id"),
-            "subtitle_last_refresh": int(datetime.now().strftime("%s")),
+            "subtitle_last_refresh": int(datetime.now().timestamp()),
             "subtitle_lang": self.lang,
             "subtitle_source": source,
         }

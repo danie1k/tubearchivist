@@ -4,40 +4,55 @@ Functionality:
 - holds base classes to inherit from
 """
 
-import json
+import enum
 import urllib.parse
+import uuid
 from time import sleep
 
-from api.src.search_processor import SearchProcess
+from api.src.search_processor import SearchProcess, process_aggs
+from api.views import check_admin
 from django.conf import settings
 from django.contrib.auth import login
+from django.contrib.auth.decorators import user_passes_test
 from django.contrib.auth.forms import AuthenticationForm
-from django.http import JsonResponse
+from django.http import Http404
 from django.shortcuts import redirect, render
+from django.utils.decorators import method_decorator
 from django.views import View
+from home.models import CustomPeriodicTask
+from home.src.download.queue import PendingInteract
 from home.src.download.yt_dlp_base import CookieHandler
+from home.src.es.backup import ElasticBackup
 from home.src.es.connect import ElasticWrap
-from home.src.es.index_setup import get_available_backups
-from home.src.frontend.api_calls import PostData
+from home.src.es.snapshot import ElasticSnapshot
 from home.src.frontend.forms import (
     AddToQueueForm,
     ApplicationSettingsForm,
     ChannelOverwriteForm,
+    CreatePlaylistForm,
     CustomAuthForm,
     MultiSearchForm,
-    SchedulerSettingsForm,
     SubscribeToChannelForm,
     SubscribeToPlaylistForm,
     UserSettingsForm,
 )
-from home.src.frontend.searching import SearchHandler
-from home.src.index.channel import YoutubeChannel, channel_overwrites
+from home.src.frontend.forms_schedule import (
+    NotificationSettingsForm,
+    SchedulerSettingsForm,
+)
+from home.src.index.channel import channel_overwrites
 from home.src.index.generic import Pagination
 from home.src.index.playlist import YoutubePlaylist
-from home.src.ta.config import AppConfig, ScheduleBuilder
-from home.src.ta.helper import UrlListParser, time_parser
+from home.src.index.reindex import ReindexProgress
+from home.src.index.video_constants import VideoTypeEnum
+from home.src.ta.config import AppConfig, ReleaseVersion
+from home.src.ta.config_schedule import ScheduleBuilder
+from home.src.ta.helper import check_stylesheet, time_parser
+from home.src.ta.notify import Notifications, get_all_notifications
+from home.src.ta.settings import EnvironmentSettings
 from home.src.ta.ta_redis import RedisArchivist
-from home.tasks import extrac_dl, index_channel_playlists, subscribe_to
+from home.src.ta.users import UserConfig
+from home.tasks import index_channel_playlists, subscribe_to
 from rest_framework.authtoken.models import Token
 
 
@@ -48,102 +63,48 @@ class ArchivistViewConfig(View):
         super().__init__()
         self.view_origin = view_origin
         self.user_id = False
-        self.user_conf = False
-        self.default_conf = False
+        self.user_conf: UserConfig = False
         self.context = False
 
-    def _get_sort_by(self):
-        """return sort_by config var"""
-        messag_key = f"{self.user_id}:sort_by"
-        sort_by = self.user_conf.get_message(messag_key)["status"]
-        if not sort_by:
-            sort_by = self.default_conf["archive"]["sort_by"]
-
-        return sort_by
-
-    def _get_sort_order(self):
-        """return sort_order config var"""
-        sort_order_key = f"{self.user_id}:sort_order"
-        sort_order = self.user_conf.get_message(sort_order_key)["status"]
-        if not sort_order:
-            sort_order = self.default_conf["archive"]["sort_order"]
-
-        return sort_order
-
-    def _get_view_style(self):
-        """return view_style config var"""
-        view_key = f"{self.user_id}:view:{self.view_origin}"
-        view_style = self.user_conf.get_message(view_key)["status"]
-        if not view_style:
-            view_style = self.default_conf["default_view"][self.view_origin]
-
-        return view_style
-
-    def _get_grid_items(self):
-        """return items per row to show in grid view"""
-        grid_key = f"{self.user_id}:grid_items"
-        grid_items = self.user_conf.get_message(grid_key)["status"]
-        if not grid_items:
-            grid_items = self.default_conf["default_view"]["grid_items"]
-
-        return grid_items
-
     def get_all_view_styles(self):
-        """get dict of all view stiles for search form"""
-        all_keys = ["channel", "playlist", "home"]
+        """get dict of all view styles for search form"""
         all_styles = {}
-        for view_origin in all_keys:
-            view_key = f"{self.user_id}:view:{view_origin}"
-            view_style = self.user_conf.get_message(view_key)["status"]
-            if not view_style:
-                view_style = self.default_conf["default_view"][view_origin]
-            all_styles[view_origin] = view_style
+        for view_origin in ["channel", "playlist", "home", "downloads"]:
+            all_styles[view_origin] = self.user_conf.get_value(
+                f"view_style_{view_origin}"
+            )
 
         return all_styles
-
-    def _get_hide_watched(self):
-        hide_watched_key = f"{self.user_id}:hide_watched"
-        hide_watched = self.user_conf.get_message(hide_watched_key)["status"]
-
-        return hide_watched
-
-    def _get_show_ignore_only(self):
-        ignored_key = f"{self.user_id}:show_ignored_only"
-        show_ignored_only = self.user_conf.get_message(ignored_key)["status"]
-
-        return show_ignored_only
-
-    def _get_show_subed_only(self):
-        sub_only_key = f"{self.user_id}:show_subed_only"
-        show_subed_only = self.user_conf.get_message(sub_only_key)["status"]
-
-        return show_subed_only
 
     def config_builder(self, user_id):
         """build default context for every view"""
         self.user_id = user_id
-        self.user_conf = RedisArchivist()
-        self.default_conf = AppConfig(self.user_id).config
+        self.user_conf = UserConfig(self.user_id)
 
         self.context = {
-            "colors": self.default_conf["application"]["colors"],
-            "cast": self.default_conf["application"]["enable_cast"],
-            "sort_by": self._get_sort_by(),
-            "sort_order": self._get_sort_order(),
-            "view_style": self._get_view_style(),
-            "grid_items": self._get_grid_items(),
-            "hide_watched": self._get_hide_watched(),
-            "show_ignored_only": self._get_show_ignore_only(),
-            "show_subed_only": self._get_show_subed_only(),
+            "stylesheet": check_stylesheet(
+                self.user_conf.get_value("stylesheet")
+            ),
+            "cast": EnvironmentSettings.ENABLE_CAST,
+            "sort_by": self.user_conf.get_value("sort_by"),
+            "sort_order": self.user_conf.get_value("sort_order"),
+            "view_style": self.user_conf.get_value(
+                f"view_style_{self.view_origin}"
+            ),
+            "grid_items": self.user_conf.get_value("grid_items"),
+            "hide_watched": self.user_conf.get_value("hide_watched"),
+            "show_ignored_only": self.user_conf.get_value("show_ignored_only"),
+            "show_subed_only": self.user_conf.get_value("show_subed_only"),
             "version": settings.TA_VERSION,
+            "ta_update": ReleaseVersion().get_update(),
         }
 
 
 class ArchivistResultsView(ArchivistViewConfig):
     """View class to inherit from when searching data in es"""
 
-    view_origin = False
-    es_search = False
+    view_origin = ""
+    es_search = ""
 
     def __init__(self):
         super().__init__(self.view_origin)
@@ -159,6 +120,8 @@ class ArchivistResultsView(ArchivistViewConfig):
             "likes": "stats.like_count",
             "downloaded": "date_downloaded",
             "published": "published",
+            "duration": "player.duration",
+            "filesize": "media_size",
         }
         sort_by = sort_by_map[self.context["sort_by"]]
 
@@ -194,8 +157,7 @@ class ArchivistResultsView(ArchivistViewConfig):
         self.context["continue_vids"] = self.get_in_progress(results)
 
         in_progress = {i["youtube_id"]: i["position"] for i in results}
-        for hit in self.context["results"]:
-            video = hit["source"]
+        for video in self.context["results"]:
             if video["youtube_id"] in in_progress:
                 played_sec = in_progress.get(video["youtube_id"])
                 total = video["player"]["duration"]
@@ -207,32 +169,35 @@ class ArchivistResultsView(ArchivistViewConfig):
         """get all videos in progress"""
         ids = [{"match": {"youtube_id": i.get("youtube_id")}} for i in results]
         data = {
-            "size": self.default_conf["archive"]["page_size"],
+            "size": UserConfig(self.user_id).get_value("page_size"),
             "query": {"bool": {"should": ids}},
             "sort": [{"published": {"order": "desc"}}],
         }
-        search = SearchHandler(
-            "ta_video/_search", self.default_conf, data=data
-        )
-        videos = search.get_data()
+        response, _ = ElasticWrap("ta_video/_search").get(data)
+        videos = SearchProcess(response).process()
+
         if not videos:
             return False
 
         for video in videos:
-            youtube_id = video["source"]["youtube_id"]
+            youtube_id = video["youtube_id"]
             matched = [i for i in results if i["youtube_id"] == youtube_id]
             played_sec = matched[0]["position"]
-            total = video["source"]["player"]["duration"]
+            total = video["player"]["duration"]
             if not total:
                 total = matched[0].get("position") * 2
-            video["source"]["player"]["progress"] = 100 * (played_sec / total)
+            video["player"]["progress"] = 100 * (played_sec / total)
 
         return videos
 
     def single_lookup(self, es_path):
         """retrieve a single item from url"""
-        search = SearchHandler(es_path, config=self.default_conf)
-        result = search.get_data()[0]["source"]
+        response, status_code = ElasticWrap(es_path).get()
+        if not status_code == 200:
+            raise Http404
+
+        result = SearchProcess(response).process()
+
         return result
 
     def initiate_vars(self, request):
@@ -246,13 +211,34 @@ class ArchivistResultsView(ArchivistViewConfig):
 
     def find_results(self):
         """add results and pagination to context"""
-        search = SearchHandler(
-            self.es_search, config=self.default_conf, data=self.data
+        response, _ = ElasticWrap(self.es_search).get(self.data)
+        process_aggs(response)
+        results = SearchProcess(response).process()
+        max_hits = response["hits"]["total"]["value"]
+        self.pagination_handler.validate(max_hits)
+        self.context.update(
+            {
+                "results": results,
+                "max_hits": max_hits,
+                "pagination": self.pagination_handler.pagination,
+                "aggs": response.get("aggregations"),
+            }
         )
-        self.context["results"] = search.get_data()
-        self.pagination_handler.validate(search.max_hits)
-        self.context["max_hits"] = search.max_hits
-        self.context["pagination"] = self.pagination_handler.pagination
+
+
+class MinView(View):
+    """to inherit from for minimal config vars"""
+
+    @staticmethod
+    def get_min_context(request):
+        """build minimal vars for context"""
+        return {
+            "stylesheet": check_stylesheet(
+                UserConfig(request.user.id).get_value("stylesheet")
+            ),
+            "version": settings.TA_VERSION,
+            "ta_update": ReleaseVersion().get_update(),
+        }
 
 
 class HomeView(ArchivistResultsView):
@@ -296,20 +282,23 @@ class HomeView(ArchivistResultsView):
             self.data["query"] = query
 
 
-class LoginView(View):
+class LoginView(MinView):
     """resolves to /login/
     Greeting and login page
     """
 
     SEC_IN_DAY = 60 * 60 * 24
 
-    @staticmethod
-    def get(request):
+    def get(self, request):
         """handle get requests"""
-        failed = bool(request.GET.get("failed"))
-        colors = AppConfig(request.user.id).colors
-        form = CustomAuthForm()
-        context = {"colors": colors, "form": form, "form_error": failed}
+        context = self.get_min_context(request)
+        context.update(
+            {
+                "form": CustomAuthForm(),
+                "form_error": bool(request.GET.get("failed")),
+            }
+        )
+
         return render(request, "home/login.html", context)
 
     def post(self, request):
@@ -331,25 +320,22 @@ class LoginView(View):
         return redirect("/login?failed=true")
 
 
-class AboutView(View):
+class AboutView(MinView):
     """resolves to /about/
     show helpful how to information
     """
 
-    @staticmethod
-    def get(request):
+    def get(self, request):
         """handle http get"""
-        context = {
-            "title": "About",
-            "colors": AppConfig(request.user.id).colors,
-            "version": settings.TA_VERSION,
-        }
+        context = self.get_min_context(request)
+        context.update({"title": "About"})
         return render(request, "home/about.html", context)
 
 
+@method_decorator(user_passes_test(check_admin), name="dispatch")
 class DownloadView(ArchivistResultsView):
     """resolves to /download/
-    takes POST for downloading youtube links
+    handle the download queue
     """
 
     view_origin = "downloads"
@@ -358,13 +344,13 @@ class DownloadView(ArchivistResultsView):
     def get(self, request):
         """handle get request"""
         self.initiate_vars(request)
-        self._update_view_data(request)
+        filter_view = self._update_view_data(request)
         self.find_results()
         self.context.update(
             {
                 "title": "Downloads",
                 "add_form": AddToQueueForm(),
-                "channel_agg_list": self._get_channel_agg(),
+                "channel_agg_list": self._get_channel_agg(filter_view),
             }
         )
         return render(request, "home/downloads.html", self.context)
@@ -384,27 +370,31 @@ class DownloadView(ArchivistResultsView):
                 {"term": {"channel_id": {"value": channel_filter}}}
             )
 
-            channel = YoutubeChannel(channel_filter)
-            channel.get_from_es()
+            channel = PendingInteract(channel_filter).get_channel()
             self.context.update(
                 {
-                    "channel_filter_id": channel_filter,
-                    "channel_filter_name": channel.json_data["channel_name"],
+                    "channel_filter_id": channel.get("channel_id"),
+                    "channel_filter_name": channel.get("channel_name"),
                 }
             )
 
         self.data.update(
             {
                 "query": {"bool": {"must": must_list}},
-                "sort": [{"timestamp": {"order": "asc"}}],
+                "sort": [
+                    {"auto_start": {"order": "desc"}},
+                    {"timestamp": {"order": "asc"}},
+                ],
             }
         )
 
-    def _get_channel_agg(self):
+        return filter_view
+
+    def _get_channel_agg(self, filter_view):
         """get pending channel with count"""
         data = {
             "size": 0,
-            "query": {"term": {"status": {"value": "pending"}}},
+            "query": {"term": {"status": {"value": filter_view}}},
             "aggs": {
                 "channel_downloads": {
                     "multi_terms": {
@@ -432,34 +422,6 @@ class DownloadView(ArchivistResultsView):
 
         return buckets_sorted
 
-    @staticmethod
-    def post(request):
-        """handle post requests"""
-        to_queue = AddToQueueForm(data=request.POST)
-        if to_queue.is_valid():
-            url_str = request.POST.get("vid_url")
-            print(url_str)
-            try:
-                youtube_ids = UrlListParser(url_str).process_list()
-            except ValueError:
-                # failed to process
-                key = "message:add"
-                print(f"failed to parse: {url_str}")
-                mess_dict = {
-                    "status": key,
-                    "level": "error",
-                    "title": "Failed to extract links.",
-                    "message": "Not a video, channel or playlist ID or URL",
-                }
-                RedisArchivist().set_message(key, mess_dict, expire=True)
-                return redirect("downloads")
-
-            print(youtube_ids)
-            extrac_dl.delay(youtube_ids)
-
-        sleep(2)
-        return redirect("downloads", permanent=True)
-
 
 class ChannelIdBaseView(ArchivistResultsView):
     """base class for all channel-id views"""
@@ -469,8 +431,17 @@ class ChannelIdBaseView(ArchivistResultsView):
         path = f"ta_channel/_doc/{channel_id}"
         response, _ = ElasticWrap(path).get()
         channel_info = SearchProcess(response).process()
+        if not channel_info:
+            raise Http404
 
         return channel_info
+
+    def channel_pages(self, channel_id):
+        """get additional context for channel pages"""
+        self.channel_has_pending(channel_id)
+        self.channel_has_streams(channel_id)
+        self.channel_has_shorts(channel_id)
+        self.channel_has_playlist(channel_id)
 
     def channel_has_pending(self, channel_id):
         """check if channel has pending videos in queue"""
@@ -485,10 +456,52 @@ class ChannelIdBaseView(ArchivistResultsView):
                     ]
                 }
             },
+            "_source": False,
         }
         response, _ = ElasticWrap(path).get(data=data)
 
         self.context.update({"has_pending": bool(response["hits"]["hits"])})
+
+    def channel_has_streams(self, channel_id):
+        """check if channel has streams videos"""
+        data = self.get_type_data("streams", channel_id)
+        response, _ = ElasticWrap("ta_video/_search").get(data=data)
+
+        self.context.update({"has_streams": bool(response["hits"]["hits"])})
+
+    def channel_has_shorts(self, channel_id):
+        """check if channel has shorts videos"""
+        data = self.get_type_data("shorts", channel_id)
+        response, _ = ElasticWrap("ta_video/_search").get(data=data)
+
+        self.context.update({"has_shorts": bool(response["hits"]["hits"])})
+
+    @staticmethod
+    def get_type_data(vid_type, channel):
+        """build data query for vid_type"""
+        return {
+            "size": 1,
+            "query": {
+                "bool": {
+                    "must": [
+                        {"term": {"vid_type": {"value": vid_type}}},
+                        {"term": {"channel.channel_id": {"value": channel}}},
+                    ]
+                }
+            },
+            "_source": False,
+        }
+
+    def channel_has_playlist(self, channel_id):
+        """check if channel has any playlist indexed"""
+        path = "ta_playlist/_search"
+        data = {
+            "size": 1,
+            "query": {"term": {"playlist_channel_id": {"value": channel_id}}},
+            "_source": False,
+        }
+        response, _ = ElasticWrap(path).get(data=data)
+        self.context.update({"has_playlists": bool(response["hits"]["hits"])})
 
 
 class ChannelIdView(ChannelIdBaseView):
@@ -498,6 +511,7 @@ class ChannelIdView(ChannelIdBaseView):
 
     view_origin = "home"
     es_search = "ta_video/_search"
+    video_types = [VideoTypeEnum.VIDEOS]
 
     def get(self, request, channel_id):
         """get request"""
@@ -505,10 +519,10 @@ class ChannelIdView(ChannelIdBaseView):
         self._update_view_data(channel_id)
         self.find_results()
         self.match_progress()
-        self.channel_has_pending(channel_id)
+        self.channel_pages(channel_id)
 
         if self.context["results"]:
-            channel_info = self.context["results"][0]["source"]["channel"]
+            channel_info = self.context["results"][0]["channel"]
             channel_name = channel_info["channel_name"]
         else:
             # fall back channel lookup if no videos found
@@ -518,7 +532,7 @@ class ChannelIdView(ChannelIdBaseView):
 
         self.context.update(
             {
-                "title": "Channel: " + channel_name,
+                "title": f"Channel: {channel_name}",
                 "channel_info": channel_info,
             }
         )
@@ -527,12 +541,27 @@ class ChannelIdView(ChannelIdBaseView):
 
     def _update_view_data(self, channel_id):
         """update view specific data dict"""
+        vid_type_terms = []
+        for t in self.video_types:
+            if t and isinstance(t, enum.Enum):
+                vid_type_terms.append(t.value)
+            else:
+                print(
+                    "Invalid value passed into video_types on "
+                    + f"ChannelIdView: {t}"
+                )
         self.data["query"] = {
             "bool": {
                 "must": [
-                    {"term": {"channel.channel_id": {"value": channel_id}}}
+                    {"term": {"channel.channel_id": {"value": channel_id}}},
+                    {"terms": {"vid_type": vid_type_terms}},
                 ]
             }
+        }
+        self.data["aggs"] = {
+            "total_items": {"value_count": {"field": "youtube_id"}},
+            "total_size": {"sum": {"field": "media_size"}},
+            "total_duration": {"sum": {"field": "player.duration"}},
         }
         self.data["sort"].append({"title.keyword": {"order": "asc"}})
 
@@ -540,20 +569,21 @@ class ChannelIdView(ChannelIdBaseView):
             to_append = {"term": {"player.watched": {"value": False}}}
             self.data["query"]["bool"]["must"].append(to_append)
 
-    @staticmethod
-    def post(request, channel_id):
-        """handle post request"""
-        print(f"handle post from {channel_id}")
-        channel_overwrite_form = ChannelOverwriteForm(request.POST)
-        if channel_overwrite_form.is_valid():
-            overwrites = channel_overwrite_form.cleaned_data
-            print(f"{channel_id}: set overwrites {overwrites}")
-            channel_overwrites(channel_id, overwrites=overwrites)
-            if overwrites.get("index_playlists") == "1":
-                index_channel_playlists.delay(channel_id)
 
-        sleep(1)
-        return redirect("channel_id", channel_id, permanent=True)
+class ChannelIdLiveView(ChannelIdView):
+    """resolves to /channel/<channel-id>/streams/
+    display single channel page from channel_id
+    """
+
+    video_types = [VideoTypeEnum.STREAMS]
+
+
+class ChannelIdShortsView(ChannelIdView):
+    """resolves to /channel/<channel-id>/shorts/
+    display single channel page from channel_id
+    """
+
+    video_types = [VideoTypeEnum.SHORTS]
 
 
 class ChannelIdAboutView(ChannelIdBaseView):
@@ -566,24 +596,26 @@ class ChannelIdAboutView(ChannelIdBaseView):
     def get(self, request, channel_id):
         """handle get request"""
         self.initiate_vars(request)
-        self.channel_has_pending(channel_id)
+        self.channel_pages(channel_id)
 
-        path = f"ta_channel/_doc/{channel_id}"
-        response, _ = ElasticWrap(path).get()
-
+        response, _ = ElasticWrap(f"ta_channel/_doc/{channel_id}").get()
         channel_info = SearchProcess(response).process()
-        channel_name = channel_info["channel_name"]
+        reindex = ReindexProgress(
+            request_type="channel", request_id=channel_id
+        ).get_progress()
 
         self.context.update(
             {
-                "title": "Channel: About " + channel_name,
+                "title": "Channel: About " + channel_info["channel_name"],
                 "channel_info": channel_info,
                 "channel_overwrite_form": ChannelOverwriteForm,
+                "reindex": reindex.get("state"),
             }
         )
 
         return render(request, "home/channel_id_about.html", self.context)
 
+    @method_decorator(user_passes_test(check_admin), name="dispatch")
     @staticmethod
     def post(request, channel_id):
         """handle post request"""
@@ -613,7 +645,7 @@ class ChannelIdPlaylistView(ChannelIdBaseView):
         self.initiate_vars(request)
         self._update_view_data(channel_id)
         self.find_results()
-        self.channel_has_pending(channel_id)
+        self.channel_pages(channel_id)
 
         channel_info = self.get_channel_meta(channel_id)
         channel_name = channel_info["channel_name"]
@@ -668,22 +700,15 @@ class ChannelView(ArchivistResultsView):
                 "term": {"channel_subscribed": {"value": True}}
             }
 
+    @method_decorator(user_passes_test(check_admin), name="dispatch")
     @staticmethod
     def post(request):
         """handle http post requests"""
         subscribe_form = SubscribeToChannelForm(data=request.POST)
         if subscribe_form.is_valid():
-            key = "message:subchannel"
-            message = {
-                "status": key,
-                "level": "info",
-                "title": "Subscribing to Channels",
-                "message": "Parsing form data",
-            }
-            RedisArchivist().set_message(key, message=message, expire=True)
             url_str = request.POST.get("subscribe")
             print(url_str)
-            subscribe_to.delay(url_str)
+            subscribe_to.delay(url_str, expected_type="channel")
 
         sleep(1)
         return redirect("channel", permanent=True)
@@ -701,16 +726,24 @@ class PlaylistIdView(ArchivistResultsView):
         """handle get request"""
         self.initiate_vars(request)
         playlist_info, channel_info = self._get_info(playlist_id)
+        if not playlist_info:
+            raise Http404
+
         playlist_name = playlist_info["playlist_name"]
         self._update_view_data(playlist_id, playlist_info)
         self.find_results()
         self.match_progress()
+        reindex = ReindexProgress(
+            request_type="playlist", request_id=playlist_id
+        ).get_progress()
+
         self.context.update(
             {
                 "title": "Playlist: " + playlist_name,
                 "playlist_info": playlist_info,
                 "playlist_name": playlist_name,
                 "channel_info": channel_info,
+                "reindex": reindex.get("state"),
             }
         )
         return render(request, "home/playlist_id.html", self.context)
@@ -720,12 +753,12 @@ class PlaylistIdView(ArchivistResultsView):
         # playlist details
         es_path = f"ta_playlist/_doc/{playlist_id}"
         playlist_info = self.single_lookup(es_path)
-
-        # channel details
-        channel_id = playlist_info["playlist_channel_id"]
-        es_path = f"ta_channel/_doc/{channel_id}"
-        channel_info = self.single_lookup(es_path)
-
+        channel_info = None
+        if playlist_info["playlist_type"] != "custom":
+            # channel details
+            channel_id = playlist_info["playlist_channel_id"]
+            es_path = f"ta_channel/_doc/{channel_id}"
+            channel_info = self.single_lookup(es_path)
         return playlist_info, channel_info
 
     def _update_view_data(self, playlist_id, playlist_info):
@@ -783,6 +816,7 @@ class PlaylistView(ArchivistResultsView):
             {
                 "title": "Playlists",
                 "subscribe_form": SubscribeToPlaylistForm(),
+                "create_form": CreatePlaylistForm(),
             }
         )
 
@@ -814,40 +848,40 @@ class PlaylistView(ArchivistResultsView):
                 }
             }
 
+    @method_decorator(user_passes_test(check_admin), name="dispatch")
     @staticmethod
     def post(request):
-        """handle post from search form"""
-        subscribe_form = SubscribeToPlaylistForm(data=request.POST)
-        if subscribe_form.is_valid():
-            url_str = request.POST.get("subscribe")
-            print(url_str)
-            key = "message:subplaylist"
-            message = {
-                "status": key,
-                "level": "info",
-                "title": "Subscribing to Playlists",
-                "message": "Parsing form data",
-            }
-            RedisArchivist().set_message(key, message=message, expire=True)
-            subscribe_to.delay(url_str)
+        """handle post from subscribe or create form"""
+        if request.POST.get("create") is not None:
+            create_form = CreatePlaylistForm(data=request.POST)
+            if create_form.is_valid():
+                name = request.POST.get("create")
+                playlist_id = f"TA_playlist_{uuid.uuid4()}"
+                YoutubePlaylist(playlist_id).create(name)
+        else:
+            subscribe_form = SubscribeToPlaylistForm(data=request.POST)
+            if subscribe_form.is_valid():
+                url_str = request.POST.get("subscribe")
+                print(url_str)
+                subscribe_to.delay(url_str, expected_type="playlist")
 
         sleep(1)
         return redirect("playlist")
 
 
-class VideoView(View):
+class VideoView(MinView):
     """resolves to /video/<video-id>/
     display details about a single video
     """
 
     def get(self, request, video_id):
         """get single video"""
-        config_handler = AppConfig(request.user.id)
-        position = time_parser(request.GET.get("t"))
-        path = f"ta_video/_doc/{video_id}"
-        look_up = SearchHandler(path, config=False)
-        video_hit = look_up.get_data()
-        video_data = video_hit[0]["source"]
+        config_handler = AppConfig()
+        response, _ = ElasticWrap(f"ta_video/_doc/{video_id}").get()
+        video_data = SearchProcess(response).process()
+        if not video_data:
+            raise Http404
+
         try:
             rating = video_data["stats"]["average_rating"]
             video_data["stats"]["average_rating"] = self.star_creator(rating)
@@ -860,17 +894,22 @@ class VideoView(View):
         else:
             playlist_nav = False
 
-        video_title = video_data["title"]
-        context = {
-            "video": video_data,
-            "playlist_nav": playlist_nav,
-            "title": video_title,
-            "colors": config_handler.colors,
-            "cast": config_handler.config["application"]["enable_cast"],
-            "version": settings.TA_VERSION,
-            "config": config_handler.config,
-            "position": position,
-        }
+        reindex = ReindexProgress(
+            request_type="video", request_id=video_id
+        ).get_progress()
+
+        context = self.get_min_context(request)
+        context.update(
+            {
+                "video": video_data,
+                "playlist_nav": playlist_nav,
+                "title": video_data.get("title"),
+                "cast": EnvironmentSettings.ENABLE_CAST,
+                "config": config_handler.config,
+                "position": time_parser(request.GET.get("t")),
+                "reindex": reindex.get("state"),
+            }
+        )
         return render(request, "home/video.html", context)
 
     @staticmethod
@@ -910,7 +949,7 @@ class SearchView(ArchivistResultsView):
     """
 
     view_origin = "home"
-    es_search = False
+    es_search = ""
 
     def get(self, request):
         """handle get request"""
@@ -927,36 +966,82 @@ class SearchView(ArchivistResultsView):
         return render(request, "home/search.html", self.context)
 
 
-class SettingsView(View):
+class SettingsView(MinView):
     """resolves to /settings/
-    handle the settings page, display current settings,
+    handle the settings dashboard
+    """
+
+    def get(self, request):
+        """read and display the dashboard"""
+        context = self.get_min_context(request)
+        context.update({"title": "Settings Dashboard"})
+
+        return render(request, "home/settings.html", context)
+
+
+class SettingsUserView(MinView):
+    """resolves to /settings/user/
+    handle the settings sub-page for user settings,
+    display current settings,
     take post request from the form to update settings
     """
 
     def get(self, request):
         """read and display current settings"""
-        config_handler = AppConfig(request.user.id)
-        colors = config_handler.colors
+        context = self.get_min_context(request)
+        context.update(
+            {
+                "title": "User Settings",
+                "page_size": UserConfig(request.user.id).get_value(
+                    "page_size"
+                ),
+                "user_form": UserSettingsForm(),
+            }
+        )
 
-        available_backups = get_available_backups()
-        user_form = UserSettingsForm()
-        app_form = ApplicationSettingsForm()
-        scheduler_form = SchedulerSettingsForm()
-        token = self.get_token(request)
+        return render(request, "home/settings_user.html", context)
 
-        context = {
-            "title": "Settings",
-            "config": config_handler.config,
-            "api_token": token,
-            "colors": colors,
-            "available_backups": available_backups,
-            "user_form": user_form,
-            "app_form": app_form,
-            "scheduler_form": scheduler_form,
-            "version": settings.TA_VERSION,
-        }
+    def post(self, request):
+        """handle form post to update settings"""
+        user_form = UserSettingsForm(request.POST)
+        config_handler = UserConfig(request.user.id)
+        if user_form.is_valid():
+            user_form_post = user_form.cleaned_data
+            if user_form_post.get("stylesheet"):
+                config_handler.set_value(
+                    "stylesheet", user_form_post.get("stylesheet")
+                )
+            if user_form_post.get("page_size"):
+                config_handler.set_value(
+                    "page_size", user_form_post.get("page_size")
+                )
 
-        return render(request, "home/settings.html", context)
+        sleep(1)
+        return redirect("settings_user", permanent=True)
+
+
+@method_decorator(user_passes_test(check_admin), name="dispatch")
+class SettingsApplicationView(MinView):
+    """resolves to /settings/application/
+    handle the settings sub-page for application configuration,
+    display current settings,
+    take post request from the form to update settings
+    """
+
+    def get(self, request):
+        """read and display current application settings"""
+        context = self.get_min_context(request)
+        context.update(
+            {
+                "title": "Application Settings",
+                "config": AppConfig().config,
+                "api_token": self.get_token(request),
+                "app_form": ApplicationSettingsForm(),
+                "snapshots": ElasticSnapshot().get_snapshot_stats(),
+            }
+        )
+
+        return render(request, "home/settings_application.html", context)
 
     @staticmethod
     def get_token(request):
@@ -967,12 +1052,7 @@ class SettingsView(View):
 
     def post(self, request):
         """handle form post to update settings"""
-        user_form = UserSettingsForm(request.POST)
         config_handler = AppConfig()
-        if user_form.is_valid():
-            user_form_post = user_form.cleaned_data
-            if any(user_form_post.values()):
-                config_handler.set_user_config(user_form_post, request.user.id)
 
         app_form = ApplicationSettingsForm(request.POST)
         if app_form.is_valid():
@@ -982,15 +1062,8 @@ class SettingsView(View):
                 updated = config_handler.update_config(app_form_post)
                 self.post_process_updated(updated, config_handler.config)
 
-        scheduler_form = SchedulerSettingsForm(request.POST)
-        if scheduler_form.is_valid():
-            scheduler_form_post = scheduler_form.cleaned_data
-            if any(scheduler_form_post.values()):
-                print(scheduler_form_post)
-                ScheduleBuilder().update_schedule_conf(scheduler_form_post)
-
         sleep(1)
-        return redirect("settings", permanent=True)
+        return redirect("settings_application", permanent=True)
 
     def post_process_updated(self, updated, config):
         """apply changes for config"""
@@ -1000,6 +1073,8 @@ class SettingsView(View):
         for config_value, updated_value in updated:
             if config_value == "cookie_import":
                 self.process_cookie(config, updated_value)
+            if config_value == "enable_snapshot":
+                ElasticSnapshot().setup()
 
     def process_cookie(self, config, updated_value):
         """import and validate cookie"""
@@ -1026,36 +1101,99 @@ class SettingsView(View):
         key = "message:setting"
         message = {
             "status": key,
+            "group": "setting:application",
             "level": "error",
             "title": "Cookie import failed",
-            "message": message_line,
+            "messages": [message_line],
+            "id": "0000",
         }
         RedisArchivist().set_message(key, message=message, expire=True)
 
 
-def progress(request):
-    # pylint: disable=unused-argument
-    """resolves to /progress/
-    return list of messages for frontend
+@method_decorator(user_passes_test(check_admin), name="dispatch")
+class SettingsSchedulingView(MinView):
+    """resolves to /settings/scheduling/
+    handle the settings sub-page for scheduling settings,
+    display current settings,
+    take post request from the form to update settings
     """
-    all_messages = RedisArchivist().get_progress()
-    json_data = {"messages": all_messages}
-    return JsonResponse(json_data)
+
+    def get(self, request):
+        """read and display current settings"""
+        context = self.get_context(request, SchedulerSettingsForm())
+
+        return render(request, "home/settings_scheduling.html", context)
+
+    def post(self, request):
+        """handle form post to update settings"""
+        scheduler_form = SchedulerSettingsForm(request.POST)
+        notification_form = NotificationSettingsForm(request.POST)
+
+        if notification_form.is_valid():
+            notification_form_post = notification_form.cleaned_data
+            print(notification_form_post)
+            if any(notification_form_post.values()):
+                task_name = notification_form_post.get("task")
+                url = notification_form_post.get("notification_url")
+                Notifications(task_name).add_url(url)
+
+        if scheduler_form.is_valid():
+            scheduler_form_post = scheduler_form.cleaned_data
+            if any(scheduler_form_post.values()):
+                print(scheduler_form_post)
+                ScheduleBuilder().update_schedule_conf(scheduler_form_post)
+        else:
+            self.fail_message()
+            context = self.get_context(request, scheduler_form)
+            return render(request, "home/settings_scheduling.html", context)
+
+        sleep(1)
+        return redirect("settings_scheduling", permanent=True)
+
+    def get_context(self, request, scheduler_form):
+        """get context"""
+        context = self.get_min_context(request)
+        all_tasks = CustomPeriodicTask.objects.all()
+        context.update(
+            {
+                "title": "Scheduling Settings",
+                "scheduler_form": scheduler_form,
+                "notification_form": NotificationSettingsForm(),
+                "notifications": get_all_notifications(),
+            }
+        )
+        for task in all_tasks:
+            context.update({task.name: task})
+
+        return context
+
+    @staticmethod
+    def fail_message():
+        """send failure message"""
+        mess_dict = {
+            "group": "setting:schedule",
+            "level": "error",
+            "title": "Scheduler update failed.",
+            "messages": ["Invalid schedule input"],
+            "id": "0000",
+        }
+        RedisArchivist().set_message("message:setting", mess_dict, expire=True)
 
 
-def process(request):
-    """handle all the buttons calls via POST ajax"""
-    if request.method == "POST":
-        current_user = request.user.id
-        post_dict = json.loads(request.body.decode())
-        if post_dict.get("reset-token"):
-            print("revoke API token")
-            request.user.auth_token.delete()
-            return JsonResponse({"success": True})
+@method_decorator(user_passes_test(check_admin), name="dispatch")
+class SettingsActionsView(MinView):
+    """resolves to /settings/actions/
+    handle the settings actions sub-page
+    """
 
-        post_handler = PostData(post_dict, current_user)
-        if post_handler.to_exec:
-            task_result = post_handler.run_task()
-            return JsonResponse(task_result)
+    def get(self, request):
+        """read and display current settings"""
+        context = self.get_min_context(request)
+        context.update(
+            {
+                "title": "Actions",
+                "available_backups": ElasticBackup().get_all_backup_files(),
+            }
+        )
 
-    return JsonResponse({"success": False})
+        return render(request, "home/settings_actions.html", context)

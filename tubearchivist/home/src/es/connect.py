@@ -4,10 +4,14 @@ functionality:
 - reusable search_after to extract total index
 """
 
+# pylint: disable=missing-timeout
+
 import json
+from typing import Any
 
 import requests
-from home.src.ta.config import AppConfig
+import urllib3
+from home.src.ta.settings import EnvironmentSettings
 
 
 class ElasticWrap:
@@ -15,59 +19,94 @@ class ElasticWrap:
     returns response json and status code tuple
     """
 
-    def __init__(self, path, config=False):
-        self.url = False
-        self.auth = False
-        self.path = path
-        self.config = config
-        self._get_config()
+    def __init__(self, path: str):
+        self.url: str = f"{EnvironmentSettings.ES_URL}/{path}"
+        self.auth: tuple[str, str] = (
+            EnvironmentSettings.ES_USER,
+            EnvironmentSettings.ES_PASS,
+        )
 
-    def _get_config(self):
-        """add config if not passed"""
-        if not self.config:
-            self.config = AppConfig().config
+        if EnvironmentSettings.ES_DISABLE_VERIFY_SSL:
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-        es_url = self.config["application"]["es_url"]
-        self.auth = self.config["application"]["es_auth"]
-        self.url = f"{es_url}/{self.path}"
-
-    def get(self, data=False):
+    def get(
+        self,
+        data: bool | dict = False,
+        timeout: int = 10,
+        print_error: bool = True,
+    ) -> tuple[dict, int]:
         """get data from es"""
+
+        kwargs: dict[str, Any] = {
+            "auth": self.auth,
+            "timeout": timeout,
+        }
+
+        if EnvironmentSettings.ES_DISABLE_VERIFY_SSL:
+            kwargs["verify"] = False
+
         if data:
-            response = requests.get(self.url, json=data, auth=self.auth)
-        else:
-            response = requests.get(self.url, auth=self.auth)
-        if not response.ok:
+            kwargs["json"] = data
+
+        response = requests.get(self.url, **kwargs)
+
+        if print_error and not response.ok:
             print(response.text)
 
         return response.json(), response.status_code
 
-    def post(self, data=False, ndjson=False):
+    def post(
+        self, data: bool | dict = False, ndjson: bool = False
+    ) -> tuple[dict, int]:
         """post data to es"""
-        if ndjson:
-            headers = {"Content-type": "application/x-ndjson"}
-            payload = data
-        else:
-            headers = {"Content-type": "application/json"}
-            payload = json.dumps(data)
 
-        if data:
-            response = requests.post(
-                self.url, data=payload, headers=headers, auth=self.auth
+        kwargs: dict[str, Any] = {"auth": self.auth}
+
+        if ndjson and data:
+            kwargs.update(
+                {
+                    "headers": {"Content-type": "application/x-ndjson"},
+                    "data": data,
+                }
             )
-        else:
-            response = requests.post(self.url, headers=headers, auth=self.auth)
+        elif data:
+            kwargs.update(
+                {
+                    "headers": {"Content-type": "application/json"},
+                    "data": json.dumps(data),
+                }
+            )
+
+        if EnvironmentSettings.ES_DISABLE_VERIFY_SSL:
+            kwargs["verify"] = False
+
+        response = requests.post(self.url, **kwargs)
 
         if not response.ok:
             print(response.text)
 
         return response.json(), response.status_code
 
-    def put(self, data, refresh=False):
+    def put(
+        self,
+        data: bool | dict = False,
+        refresh: bool = False,
+    ) -> tuple[dict, Any]:
         """put data to es"""
+
         if refresh:
             self.url = f"{self.url}/?refresh=true"
-        response = requests.put(f"{self.url}", json=data, auth=self.auth)
+
+        kwargs: dict[str, Any] = {
+            "json": data,
+            "auth": self.auth,
+        }
+
+        if EnvironmentSettings.ES_DISABLE_VERIFY_SSL:
+            kwargs["verify"] = False
+
+        response = requests.put(self.url, **kwargs)
+
         if not response.ok:
             print(response.text)
             print(data)
@@ -75,14 +114,25 @@ class ElasticWrap:
 
         return response.json(), response.status_code
 
-    def delete(self, data=False, refresh=False):
+    def delete(
+        self,
+        data: bool | dict = False,
+        refresh: bool = False,
+    ) -> tuple[dict, Any]:
         """delete document from es"""
+
         if refresh:
             self.url = f"{self.url}/?refresh=true"
+
+        kwargs: dict[str, Any] = {"auth": self.auth}
+
         if data:
-            response = requests.delete(self.url, json=data, auth=self.auth)
-        else:
-            response = requests.delete(self.url, auth=self.auth)
+            kwargs["json"] = data
+
+        if EnvironmentSettings.ES_DISABLE_VERIFY_SSL:
+            kwargs["verify"] = False
+
+        response = requests.delete(self.url, **kwargs)
 
         if not response.ok:
             print(response.text)
@@ -94,8 +144,10 @@ class IndexPaginate:
     """use search_after to go through whole index
     kwargs:
     - size: int, overwrite DEFAULT_SIZE
-    - keep_source: bool, keep _source key from es resutls
-    - callback: obj, Class with run method collback for every loop
+    - keep_source: bool, keep _source key from es results
+    - callback: obj, Class implementing run method callback for every loop
+    - task: task object to send notification
+    - total: int, total items in index for progress message
     """
 
     DEFAULT_SIZE = 500
@@ -104,12 +156,10 @@ class IndexPaginate:
         self.index_name = index_name
         self.data = data
         self.pit_id = False
-        self.size = kwargs.get("size")
-        self.keep_source = kwargs.get("keep_source")
-        self.callback = kwargs.get("callback")
+        self.kwargs = kwargs
 
     def get_results(self):
-        """get all results"""
+        """get all results, add task and total for notifications"""
         self.get_pit()
         self.validate_data()
         all_results = self.run_loop()
@@ -124,11 +174,16 @@ class IndexPaginate:
 
     def validate_data(self):
         """add pit and size to data"""
-        if "sort" not in self.data.keys():
-            print(self.data)
-            raise ValueError("missing sort key in data")
+        if not self.data:
+            self.data = {}
 
-        self.data["size"] = self.size or self.DEFAULT_SIZE
+        if "query" not in self.data.keys():
+            self.data.update({"query": {"match_all": {}}})
+
+        if "sort" not in self.data.keys():
+            self.data.update({"sort": [{"_doc": {"order": "desc"}}]})
+
+        self.data["size"] = self.kwargs.get("size") or self.DEFAULT_SIZE
         self.data["pit"] = {"id": self.pit_id, "keep_alive": "10m"}
 
     def run_loop(self):
@@ -138,30 +193,39 @@ class IndexPaginate:
         while True:
             response, _ = ElasticWrap("_search").get(data=self.data)
             all_hits = response["hits"]["hits"]
-            if all_hits:
-                for hit in all_hits:
-                    if self.keep_source:
-                        source = hit
-                    else:
-                        source = hit["_source"]
-
-                    if not self.callback:
-                        all_results.append(source)
-
-                if self.callback:
-                    self.callback(all_hits, self.index_name).run()
-                    if counter % 10 == 0:
-                        print(f"{self.index_name}: processing page {counter}")
-                    counter = counter + 1
-
-                # update search_after with last hit data
-                self.data["search_after"] = all_hits[-1]["sort"]
-            else:
+            if not all_hits:
                 break
+
+            for hit in all_hits:
+                if self.kwargs.get("keep_source"):
+                    all_results.append(hit)
+                else:
+                    all_results.append(hit["_source"])
+
+            if self.kwargs.get("callback"):
+                self.kwargs.get("callback")(
+                    all_hits, self.index_name, counter=counter
+                ).run()
+
+            if self.kwargs.get("task"):
+                print(f"{self.index_name}: processing page {counter}")
+                self._notify(len(all_results))
+
+            counter += 1
+
+            # update search_after with last hit data
+            self.data["search_after"] = all_hits[-1]["sort"]
 
         return all_results
 
+    def _notify(self, processed):
+        """send notification on task"""
+        total = self.kwargs.get("total")
+        progress = processed / total
+        index_clean = self.index_name.lstrip("ta_").title()
+        message = [f"Processing {index_clean}s {processed}/{total}"]
+        self.kwargs.get("task").send_progress(message, progress=progress)
+
     def clean_pit(self):
         """delete pit from elastic search"""
-        data = {"id": self.pit_id}
-        ElasticWrap("_pit").delete(data=data)
+        ElasticWrap("_pit").delete(data={"id": self.pit_id})

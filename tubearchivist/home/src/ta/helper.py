@@ -3,31 +3,29 @@ Loose collection of helper functions
 - don't import AppConfig class here to avoid circular imports
 """
 
+import json
+import os
 import random
-import re
 import string
 import subprocess
-import unicodedata
 from datetime import datetime
-from urllib.parse import parse_qs, urlparse
+from typing import Any
+from urllib.parse import urlparse
 
-from home.src.download.yt_dlp_base import YtWrap
-
-
-def clean_string(file_name):
-    """clean string to only asci characters"""
-    whitelist = "-_.() " + string.ascii_letters + string.digits
-    normalized = unicodedata.normalize("NFKD", file_name)
-    ascii_only = normalized.encode("ASCII", "ignore").decode().strip()
-    white_listed = "".join(c for c in ascii_only if c in whitelist)
-    cleaned = re.sub(r"[ ]{2,}", " ", white_listed)
-    return cleaned
+import requests
+from home.src.es.connect import IndexPaginate
+from home.src.ta.settings import EnvironmentSettings
 
 
-def ignore_filelist(filelist):
+def ignore_filelist(filelist: list[str]) -> list[str]:
     """ignore temp files for os.listdir sanitizer"""
-    to_ignore = ["Icon\r\r", "Temporary Items", "Network Trash Folder"]
-    cleaned = []
+    to_ignore = [
+        "@eaDir",
+        "Icon\r\r",
+        "Network Trash Folder",
+        "Temporary Items",
+    ]
+    cleaned: list[str] = []
     for file_name in filelist:
         if file_name.startswith(".") or file_name in to_ignore:
             continue
@@ -37,13 +35,13 @@ def ignore_filelist(filelist):
     return cleaned
 
 
-def randomizor(length):
+def randomizor(length: int) -> str:
     """generate random alpha numeric string"""
-    pool = string.digits + string.ascii_letters
+    pool: str = string.digits + string.ascii_letters
     return "".join(random.choice(pool) for i in range(length))
 
 
-def requests_headers():
+def requests_headers() -> dict[str, str]:
     """build header with random user agent for requests outside of yt-dlp"""
 
     chrome_versions = (
@@ -95,17 +93,19 @@ def requests_headers():
     return {"User-Agent": template}
 
 
-def date_praser(timestamp):
+def date_parser(timestamp: int | str) -> str:
     """return formatted date string"""
     if isinstance(timestamp, int):
         date_obj = datetime.fromtimestamp(timestamp)
     elif isinstance(timestamp, str):
         date_obj = datetime.strptime(timestamp, "%Y-%m-%d")
+    else:
+        raise TypeError(f"invalid timestamp: {timestamp}")
 
-    return datetime.strftime(date_obj, "%d %b, %Y")
+    return date_obj.date().isoformat()
 
 
-def time_parser(timestamp):
+def time_parser(timestamp: str) -> float:
     """return seconds from timestamp, false on empty"""
     if not timestamp:
         return False
@@ -117,152 +117,149 @@ def time_parser(timestamp):
     return int(hours) * 60 * 60 + int(minutes) * 60 + float(seconds)
 
 
-class UrlListParser:
-    """take a multi line string and detect valid youtube ids"""
+def clear_dl_cache(cache_dir: str) -> int:
+    """clear leftover files from dl cache"""
+    print("clear download cache")
+    download_cache_dir = os.path.join(cache_dir, "download")
+    leftover_files = ignore_filelist(os.listdir(download_cache_dir))
+    for cached in leftover_files:
+        to_delete = os.path.join(download_cache_dir, cached)
+        os.remove(to_delete)
 
-    def __init__(self, url_str):
-        self.url_list = [i.strip() for i in url_str.split()]
-
-    def process_list(self):
-        """loop through the list"""
-        youtube_ids = []
-        for url in self.url_list:
-            parsed = urlparse(url)
-            print(f"processing: {url}")
-            print(parsed)
-            if not parsed.netloc:
-                # is not a url
-                id_type = self.find_valid_id(url)
-                youtube_id = url
-            elif "youtube.com" not in url and "youtu.be" not in url:
-                raise ValueError(f"{url} is not a youtube link")
-            elif parsed.path:
-                # is a url
-                youtube_id, id_type = self.detect_from_url(parsed)
-            else:
-                # not detected
-                raise ValueError(f"failed to detect {url}")
-
-            youtube_ids.append({"url": youtube_id, "type": id_type})
-
-        return youtube_ids
-
-    def detect_from_url(self, parsed):
-        """detect from parsed url"""
-        if parsed.netloc == "youtu.be":
-            # shortened
-            youtube_id = parsed.path.strip("/")
-            _ = self.find_valid_id(youtube_id)
-            return youtube_id, "video"
-
-        if parsed.query:
-            # detect from query string
-            query_parsed = parse_qs(parsed.query)
-            if "v" in query_parsed:
-                youtube_id = query_parsed["v"][0]
-                _ = self.find_valid_id(youtube_id)
-                return youtube_id, "video"
-
-            if "list" in query_parsed:
-                youtube_id = query_parsed["list"][0]
-                return youtube_id, "playlist"
-
-        if parsed.path.startswith("/channel/"):
-            # channel id in url
-            youtube_id = parsed.path.split("/")[2]
-            _ = self.find_valid_id(youtube_id)
-            return youtube_id, "channel"
-
-        # detect channel with yt_dlp
-        youtube_id = self.extract_channel_name(parsed.geturl())
-        return youtube_id, "channel"
-
-    @staticmethod
-    def find_valid_id(id_str):
-        """detect valid id from length of string"""
-        str_len = len(id_str)
-        if str_len == 11:
-            id_type = "video"
-        elif str_len == 24:
-            id_type = "channel"
-        elif str_len in [34, 18] or id_str in ["LL", "WL"]:
-            id_type = "playlist"
-        else:
-            # unable to parse
-            raise ValueError("not a valid id_str: " + id_str)
-
-        return id_type
-
-    @staticmethod
-    def extract_channel_name(url):
-        """find channel id from channel name with yt-dlp help"""
-        obs_request = {
-            "skip_download": True,
-            "extract_flat": True,
-            "playlistend": 0,
-        }
-        url_info = YtWrap(obs_request).extract(url)
-        channel_id = url_info.get("channel_id", False)
-        if channel_id:
-            return channel_id
-
-        url = url_info.get("url", False)
-        if url:
-            # handle old channel name redirect with url path split
-            channel_id = urlparse(url).path.strip("/").split("/")[1]
-
-            return channel_id
-
-        print(f"failed to extract channel id from {url}")
-        raise ValueError
+    return len(leftover_files)
 
 
-class DurationConverter:
-    """
-    using ffmpeg to get and parse duration from filepath
-    """
+def get_mapping() -> dict:
+    """read index_mapping.json and get expected mapping and settings"""
+    with open("home/src/es/index_mapping.json", "r", encoding="utf-8") as f:
+        index_config: dict = json.load(f).get("index_config")
 
-    @staticmethod
-    def get_sec(file_path):
-        """read duration from file"""
-        duration = subprocess.run(
-            [
-                "ffprobe",
-                "-v",
-                "error",
-                "-show_entries",
-                "format=duration",
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
-                file_path,
-            ],
-            capture_output=True,
-            check=True,
-        )
-        duration_raw = duration.stdout.decode().strip()
-        if duration_raw == "N/A":
-            return 0
+    return index_config
 
-        duration_sec = int(float(duration_raw))
-        return duration_sec
 
-    @staticmethod
-    def get_str(duration_sec):
-        """takes duration in sec and returns clean string"""
-        if not duration_sec:
-            # failed to extract
-            return "NA"
+def is_shorts(youtube_id: str) -> bool:
+    """check if youtube_id is a shorts video, bot not it it's not a shorts"""
+    shorts_url = f"https://www.youtube.com/shorts/{youtube_id}"
+    cookies = {"SOCS": "CAI"}
+    response = requests.head(
+        shorts_url, cookies=cookies, headers=requests_headers(), timeout=10
+    )
 
-        hours = duration_sec // 3600
-        minutes = (duration_sec - (hours * 3600)) // 60
-        secs = duration_sec - (hours * 3600) - (minutes * 60)
+    return response.status_code == 200
 
-        duration_str = str()
-        if hours:
-            duration_str = str(hours).zfill(2) + ":"
-        if minutes:
-            duration_str = duration_str + str(minutes).zfill(2) + ":"
-        else:
-            duration_str = duration_str + "00:"
-        duration_str = duration_str + str(secs).zfill(2)
-        return duration_str
+
+def get_duration_sec(file_path: str) -> int:
+    """get duration of media file from file path"""
+
+    duration = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            file_path,
+        ],
+        capture_output=True,
+        check=True,
+    )
+    duration_raw = duration.stdout.decode().strip()
+    if duration_raw == "N/A":
+        return 0
+
+    duration_sec = int(float(duration_raw))
+    return duration_sec
+
+
+def get_duration_str(seconds: int) -> str:
+    """Return a human-readable duration string from seconds."""
+    if not seconds:
+        return "NA"
+
+    units = [("y", 31536000), ("d", 86400), ("h", 3600), ("m", 60), ("s", 1)]
+    duration_parts = []
+
+    for unit_label, unit_seconds in units:
+        if seconds >= unit_seconds:
+            unit_count, seconds = divmod(seconds, unit_seconds)
+            duration_parts.append(f"{unit_count:02}{unit_label}")
+
+    duration_parts[0] = duration_parts[0].lstrip("0")
+
+    return " ".join(duration_parts)
+
+
+def ta_host_parser(ta_host: str) -> tuple[list[str], list[str]]:
+    """parse ta_host env var for ALLOWED_HOSTS and CSRF_TRUSTED_ORIGINS"""
+    allowed_hosts: list[str] = [
+        "localhost",
+        "tubearchivist",
+    ]
+    csrf_trusted_origins: list[str] = [
+        "http://localhost",
+        "http://tubearchivist",
+    ]
+    for host in ta_host.split():
+        host_clean = host.strip()
+        if not host_clean.startswith("http"):
+            host_clean = f"http://{host_clean}"
+
+        parsed = urlparse(host_clean)
+        allowed_hosts.append(f"{parsed.hostname}")
+        csrf_trusted_origins.append(f"{parsed.scheme}://{parsed.hostname}")
+
+    return allowed_hosts, csrf_trusted_origins
+
+
+def get_stylesheets():
+    """Get all valid stylesheets from /static/css"""
+    app_root = EnvironmentSettings.APP_DIR
+    stylesheets = os.listdir(os.path.join(app_root, "static/css"))
+    stylesheets.remove("style.css")
+    stylesheets.sort()
+    stylesheets = list(filter(lambda x: x.endswith(".css"), stylesheets))
+    return stylesheets
+
+
+def check_stylesheet(stylesheet: str):
+    """Check if a stylesheet exists. Return dark.css as a fallback"""
+    if stylesheet in get_stylesheets():
+        return stylesheet
+
+    return "dark.css"
+
+
+def is_missing(
+    to_check: str | list[str],
+    index_name: str = "ta_video,ta_download",
+    on_key: str = "youtube_id",
+) -> list[str]:
+    """id or list of ids that are missing from index_name"""
+    if isinstance(to_check, str):
+        to_check = [to_check]
+
+    data = {
+        "query": {"terms": {on_key: to_check}},
+        "_source": [on_key],
+    }
+    result = IndexPaginate(index_name, data=data).get_results()
+    existing_ids = [i[on_key] for i in result]
+    dl = [i for i in to_check if i not in existing_ids]
+
+    return dl
+
+
+def get_channel_overwrites() -> dict[str, dict[str, Any]]:
+    """get overwrites indexed my channel_id"""
+    data = {
+        "query": {
+            "bool": {"must": [{"exists": {"field": "channel_overwrites"}}]}
+        },
+        "_source": ["channel_id", "channel_overwrites"],
+    }
+    result = IndexPaginate("ta_channel", data).get_results()
+    overwrites = {i["channel_id"]: i["channel_overwrites"] for i in result}
+
+    return overwrites

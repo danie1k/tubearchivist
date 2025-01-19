@@ -17,7 +17,8 @@ from pathlib import Path
 import ldap
 from corsheaders.defaults import default_headers
 from django_auth_ldap.config import LDAPSearch
-from home.src.ta.config import AppConfig
+from home.src.ta.helper import ta_host_parser
+from home.src.ta.settings import EnvironmentSettings
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -26,25 +27,20 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/3.2/howto/deployment/checklist/
 
-PW_HASH = hashlib.sha256(environ.get("TA_PASSWORD").encode())
+PW_HASH = hashlib.sha256(EnvironmentSettings.TA_PASSWORD.encode())
 SECRET_KEY = PW_HASH.hexdigest()
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = bool(environ.get("DJANGO_DEBUG"))
 
-ALLOWED_HOSTS = [i.strip() for i in environ.get("TA_HOST").split()]
-
-CSRF_TRUSTED_ORIGINS = []
-for host in ALLOWED_HOSTS:
-    if host.startswith("http://") or host.startswith("https://"):
-        CSRF_TRUSTED_ORIGINS.append(host)
-    else:
-        CSRF_TRUSTED_ORIGINS.append(f"http://{host}")
-
+ALLOWED_HOSTS, CSRF_TRUSTED_ORIGINS = ta_host_parser(
+    environ.get("TA_HOST", "localhost")
+)
 
 # Application definition
 
 INSTALLED_APPS = [
+    "django_celery_beat",
     "home.apps.HomeConfig",
     "django.contrib.admin",
     "django.contrib.auth",
@@ -58,6 +54,7 @@ INSTALLED_APPS = [
     "rest_framework",
     "rest_framework.authtoken",
     "api",
+    "config",
 ]
 
 MIDDLEWARE = [
@@ -70,6 +67,7 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "home.src.ta.health.HealthCheckMiddleware",
 ]
 
 ROOT_URLCONF = "config.urls"
@@ -180,13 +178,12 @@ if bool(environ.get("TA_LDAP")):
             ldap.OPT_X_TLS_REQUIRE_CERT: ldap.OPT_X_TLS_NEVER,
         }
 
-    global AUTHENTICATION_BACKENDS
     AUTHENTICATION_BACKENDS = ("django_auth_ldap.backend.LDAPBackend",)
 
 # Database
 # https://docs.djangoproject.com/en/3.2/ref/settings/#databases
 
-CACHE_DIR = AppConfig().config["application"]["cache_dir"]
+CACHE_DIR = EnvironmentSettings.CACHE_DIR
 DB_PATH = path.join(CACHE_DIR, "db.sqlite3")
 DATABASES = {
     "default": {
@@ -216,12 +213,25 @@ AUTH_PASSWORD_VALIDATORS = [
 
 AUTH_USER_MODEL = "home.Account"
 
+# Forward-auth authentication
+if bool(environ.get("TA_ENABLE_AUTH_PROXY")):
+    TA_AUTH_PROXY_USERNAME_HEADER = (
+        environ.get("TA_AUTH_PROXY_USERNAME_HEADER") or "HTTP_REMOTE_USER"
+    )
+    TA_AUTH_PROXY_LOGOUT_URL = environ.get("TA_AUTH_PROXY_LOGOUT_URL")
+
+    MIDDLEWARE.append("home.src.ta.auth.HttpRemoteUserMiddleware")
+
+    AUTHENTICATION_BACKENDS = (
+        "django.contrib.auth.backends.RemoteUserBackend",
+    )
+
 
 # Internationalization
 # https://docs.djangoproject.com/en/3.2/topics/i18n/
 
 LANGUAGE_CODE = "en-us"
-TIME_ZONE = environ.get("TZ") or "UTC"
+TIME_ZONE = EnvironmentSettings.TZ
 USE_I18N = True
 USE_L10N = True
 USE_TZ = True
@@ -233,7 +243,11 @@ USE_TZ = True
 STATIC_URL = "/static/"
 STATICFILES_DIRS = (str(BASE_DIR.joinpath("static")),)
 STATIC_ROOT = str(BASE_DIR.joinpath("staticfiles"))
-STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
+STORAGES = {
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+    },
+}
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/3.2/ref/settings/#default-auto-field
@@ -262,4 +276,4 @@ CORS_ALLOW_HEADERS = list(default_headers) + [
 
 # TA application settings
 TA_UPSTREAM = "https://github.com/tubearchivist/tubearchivist"
-TA_VERSION = "v0.2.3"
+TA_VERSION = "v0.4.13"
